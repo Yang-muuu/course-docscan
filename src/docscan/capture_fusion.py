@@ -8,10 +8,77 @@ from .enhance import gray_image
 from .page_margin import _printed_rules
 
 
+class CaptureMismatch(DocscanError):
+    def __init__(self, capture: int, detail: str, evidence: dict | None = None):
+        super().__init__("capture_mismatch", f"Capture {capture} does not reliably match the same page: {detail}")
+        self.evidence = {"capture": capture, "reason": detail, **(evidence or {})}
+
+
+def _local_ink_differences(reference: np.ndarray, candidate: np.ndarray, *,
+                           pixel_fraction: float = 0.016, local_fraction: float = 0.14) -> list[dict]:
+    """Find concentrated missing strokes, ignoring faint edges and ruled lines."""
+    height, width = reference.shape
+    short = min(height, width)
+    yy, xx = np.ogrid[:height, :width]
+    dx, dy = np.minimum(xx, width - 1 - xx), np.minimum(yy, height - 1 - yy)
+    depth = np.minimum(dx, dy)
+    possible_ink = (reference < 201) | (candidate < 201)
+    rules = _printed_rules(possible_ink.astype(np.uint8), depth.astype(np.float32), dx, dy, depth, short)
+    interior = (depth >= max(2, round(0.024 * short))) & (cv2.dilate(rules, np.ones((5, 5), np.uint8)) == 0)
+    kernel = np.ones((3, 3), np.uint8)
+    minimum = max(6, round(pixel_fraction * short))
+    padding = max(4, round(0.007 * short))
+    differences = []
+    for side, dark, other in (("reference", reference, candidate), ("capture", candidate, reference)):
+        near_other = cv2.dilate(np.uint8(other < 201), kernel)
+        missing = (dark < 160) & (near_other == 0) & interior
+        _, labels, stats, _ = cv2.connectedComponentsWithStats(cv2.dilate(missing.astype(np.uint8), kernel))
+        for label, (x, y, w, h, _) in enumerate(stats[1:], 1):
+            if min(w, h) < 4 or max(w, h) > 6 * min(w, h):
+                continue
+            region = np.s_[y:y + h, x:x + w]
+            count = int(np.count_nonzero(missing[region] & (labels[region] == label)))
+            if count < minimum:
+                continue
+            context = np.s_[max(0, y - padding):y + h + padding, max(0, x - padding):x + w + padding]
+            fraction = count / max(1, np.count_nonzero(possible_ink[context]))
+            if fraction >= local_fraction:
+                differences.append({"side": side, "box": [int(x), int(y), int(w), int(h)],
+                                    "missing_ink_pixels": count, "local_fraction": round(fraction, 4)})
+    return sorted(differences, key=lambda item: item["missing_ink_pixels"], reverse=True)
+
+
+def _rigid_ink_conflicts(reference: np.ndarray, warped: np.ndarray, shift: np.ndarray, regions: list[dict]) -> list[dict]:
+    """Check glyph shape without letting local optical flow deform the glyph itself."""
+    height, width = reference.shape
+    short = min(height, width)
+    padding = max(4, round(0.007 * short))
+    radius = max(2, round(0.003 * short))
+    conflicts = []
+    for region in regions:
+        x, y, w, h = region["box"]
+        x0, y0 = max(0, x - padding), max(0, y - padding)
+        x1, y1 = min(width, x + w + padding), min(height, y + h + padding)
+        roi = np.s_[y0:y1, x0:x1]
+        glyph = reference[roi]
+        patch_h, patch_w = glyph.shape
+        dx, dy = np.median(shift[roi].reshape(-1, 2), axis=0)
+        center = (float(np.clip((x0 + x1 - 1) / 2 + dx, 0, width - 1)),
+                  float(np.clip((y0 + y1 - 1) / 2 + dy, 0, height - 1)))
+        search = cv2.getRectSubPix(warped, (patch_w + 2 * radius, patch_h + 2 * radius), center)
+        scores = cv2.matchTemplate(search, glyph, cv2.TM_CCOEFF_NORMED)
+        _, similarity, _, (best_x, best_y) = cv2.minMaxLoc(scores)
+        counterpart = search[best_y:best_y + patch_h, best_x:best_x + patch_w]
+        ink = min(np.count_nonzero(glyph < 180), np.count_nonzero(counterpart < 180))
+        if ink >= max(6, round(0.009 * short)) and similarity < 0.88:
+            conflicts.append({**region, "rigid_similarity": round(similarity, 4)})
+    return conflicts
+
+
 def _register(reference: np.ndarray, candidate: np.ndarray, detector, keypoints, descriptors,
               capture: int) -> tuple[np.ndarray, np.ndarray, dict]:
     def mismatch(detail: str) -> DocscanError:
-        return DocscanError("capture_mismatch", f"Capture {capture} does not reliably match the same page: {detail}")
+        return CaptureMismatch(capture, detail)
 
     points, features = detector.detectAndCompute(candidate, None)
     if features is None or descriptors is None or min(len(features), len(descriptors)) < 40:
@@ -55,6 +122,15 @@ def _register(reference: np.ndarray, candidate: np.ndarray, detector, keypoints,
     support = reference_ink.astype(np.uint8) + ink
     matched = (reference_ink & near_ink).astype(np.uint8) + (ink & near_reference)
     agreement = float(matched.sum() / max(1, support.sum()))
+    before = _local_ink_differences(reference, warped, pixel_fraction=0.008, local_fraction=0.085)
+    evidence = {"capture": capture, "matches": int(inliers.sum()), "ink_agreement": round(agreement, 4),
+                "alignment_size": [width, height], "before_flow": before[:12],
+                "after_flow": _local_ink_differences(reference, aligned)[:12],
+                "rigid_conflicts": _rigid_ink_conflicts(reference, warped, shift, before)[:12]}
+    if evidence["after_flow"]:
+        raise CaptureMismatch(capture, "a local printed detail differs after alignment", evidence)
+    if evidence["rigid_conflicts"]:
+        raise CaptureMismatch(capture, "a local glyph shape differs under translation", evidence)
     tile = max(32, short // 6)
     # Fold and rim differences count toward the overall check, not the local text veto.
     margin = round(0.055 * short)
@@ -63,11 +139,11 @@ def _register(reference: np.ndarray, candidate: np.ndarray, detector, keypoints,
             roi = np.s_[y:min(y + tile, height - margin), x:min(x + tile, width - margin)]
             count = int(support[roi].sum())
             if count >= 140 and matched[roi].sum() < 0.81 * count:
-                raise mismatch("printed content differs in a local area")
+                evidence["conflict_tile"] = [x, y, min(tile, width - margin - x), min(tile, height - margin - y)]
+                raise CaptureMismatch(capture, "printed content differs in a local area", evidence)
     if agreement < 0.955:
-        raise mismatch("printed content does not agree")
-    return np.linalg.inv(matrix), shift, {"capture": capture, "matches": int(inliers.sum()),
-                                          "ink_agreement": round(agreement, 4)}
+        raise CaptureMismatch(capture, "printed content does not agree", evidence)
+    return np.linalg.inv(matrix), shift, evidence
 
 
 def _resample(image: np.ndarray, size: tuple[int, int], inverse: np.ndarray, shift: np.ndarray) -> np.ndarray:
@@ -127,7 +203,11 @@ def fuse_captures(images: list[np.ndarray]) -> tuple[np.ndarray, int, list[dict]
         if index == anchor:
             continue
         candidate = cv2.resize(gray_image(image), work_size, interpolation=cv2.INTER_AREA)
-        inverse, shift, report = _register(gray, candidate, detector, keypoints, descriptors, index + 1)
+        try:
+            inverse, shift, report = _register(gray, candidate, detector, keypoints, descriptors, index + 1)
+        except CaptureMismatch as error:
+            error.evidence.update(anchor_capture=anchor + 1, registration=matches)
+            raise
         aligned.append(_resample(image, (height, width), inverse, shift))
         matches.append(report)
 

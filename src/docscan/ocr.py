@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from bisect import bisect_right
 from pathlib import Path
 from statistics import median
 from time import perf_counter
@@ -10,10 +11,40 @@ import cv2
 import numpy as np
 
 from .common import SEED, DocscanError, dependency_versions, elapsed_ms, error_record, write_json
-from .models import MODEL_NAMES, configure_paddle_cache, model_hashes, model_status
+from .models import MODEL_NAMES, configure_paddle_cache, invalid_model_paths, model_status
 
 
-def order_lines(lines: list[dict]) -> tuple[list[dict], str]:
+def _row_groups(positions: list[tuple]) -> list[list[tuple]]:
+    rows = []
+    for position in sorted(positions, key=lambda item: (item[0], item[1])):
+        if rows and abs(position[0] - rows[-1][0][0]) <= 0.5 * min(position[2], rows[-1][0][2]):
+            rows[-1].append(position)
+        else:
+            rows.append([position])
+    return rows
+
+
+def _column_groups(positions: list[tuple], split: float) -> list[list[tuple]]:
+    spanning, body = [], []
+    for position in positions:
+        xs = [point[0] for point in position[3]["polygon"]]
+        (spanning if min(xs) < split < max(xs) else body).append(position)
+    headings = _row_groups(spanning)
+    breaks = [row[0][0] for row in headings]
+    sections = [([], []) for _ in range(len(headings) + 1)]
+    for position in body:
+        section = sections[bisect_right(breaks, position[0])]
+        section[int(position[1] >= split)].append(position)
+    rows = []
+    for index, (left, right) in enumerate(sections):
+        if index:
+            rows.append(headings[index - 1])
+        rows.extend(_row_groups(left))
+        rows.extend(_row_groups(right))
+    return rows
+
+
+def order_lines(lines: list[dict], *, column_split: float | None = None) -> tuple[list[dict], str]:
     if not lines:
         return [], ""
     slopes = []
@@ -30,12 +61,7 @@ def order_lines(lines: list[dict]) -> tuple[list[dict], str]:
         center_x = polygon[:, 0].mean()
         ys = polygon[:, 1] - slope * polygon[:, 0]
         positions.append((float(ys.mean()), float(center_x), max(1.0, float(np.ptp(ys))), line))
-    rows = []
-    for position in sorted(positions, key=lambda item: (item[0], item[1])):
-        if rows and abs(position[0] - rows[-1][0][0]) <= 0.5 * min(position[2], rows[-1][0][2]):
-            rows[-1].append(position)
-        else:
-            rows.append([position])
+    rows = _row_groups(positions) if column_split is None else _column_groups(positions, column_split)
     ordered, text_rows = [], []
     for row_index, row in enumerate(rows, start=1):
         row = sorted(row, key=lambda item: item[1])
@@ -46,8 +72,11 @@ def order_lines(lines: list[dict]) -> tuple[list[dict], str]:
 
 
 class PaddleEngine:
-    def __init__(self, settings: dict):
+    def __init__(self, settings: dict, *, reading_order: str = "rows"):
         self.settings = settings.copy()
+        if reading_order not in {"rows", "two-column"}:
+            raise DocscanError("invalid_reading_order", f"Unsupported reading order: {reading_order}")
+        self.reading_order = reading_order
         self.root = Path(settings["model_dir"]).resolve()
         self.options = {
             "use_doc_orientation_classify": False, "use_doc_unwarping": False,
@@ -74,6 +103,9 @@ class PaddleEngine:
             if missing:
                 raise DocscanError("ocr_dependency_missing", f"Missing packages: {', '.join(missing)}. Install .[ocr].")
             status = model_status(self.root)
+            invalid = invalid_model_paths(status)
+            if invalid:
+                raise DocscanError("model_file_changed", f"Invalid model files: {', '.join(invalid)}. Move the affected cache directory aside and run prepare-models.")
             missing_models = [entry["name"] for entry in status.values() if not entry["ready"]]
             if missing_models:
                 raise DocscanError("ocr_model_missing", f"Missing local model(s): {', '.join(missing_models)}. Run prepare-models.")
@@ -82,7 +114,7 @@ class PaddleEngine:
             from paddleocr import PaddleOCR
 
             paddle.seed(SEED)
-            self.model_file_sha256 = model_hashes(self.root)
+            self.model_file_sha256 = {role: model["file_sha256"] for role, model in status.items()}
             self._pipeline = PaddleOCR(
                 text_detection_model_name=MODEL_NAMES["detection"],
                 text_recognition_model_name=MODEL_NAMES["recognition"],
@@ -105,6 +137,7 @@ class PaddleEngine:
             "paddle_version": self.versions["paddlepaddle"], "paddlex_version": self.versions["paddlex"],
             "model_names": MODEL_NAMES, "model_file_sha256": self.model_file_sha256,
             "device": self.settings["device"],
+            "reading_order": self.reading_order,
             "effective_options": {**self.options, "external_max_input_side": self.settings["max_input_side"]},
             "model_load_ms": self.model_load_ms, "ocr_result_reused": False,
         }
@@ -146,7 +179,8 @@ class PaddleEngine:
                     raise DocscanError("ocr_invalid_result", "Invalid OCR quadrilateral or confidence")
                 polygon = np.clip((polygon + 0.5) * [w / iw, h / ih] - 0.5, [0, 0], [w - 1, h - 1])
                 lines.append({"polygon": polygon.tolist(), "text": text, "confidence": confidence})
-            result["lines"], result["full_text"] = order_lines(lines)
+            split = w / 2 if self.reading_order == "two-column" else None
+            result["lines"], result["full_text"] = order_lines(lines, column_split=split)
             result["raw_result"] = page.json
             result["status"] = "ok" if result["lines"] else "no_text"
         except Exception as error:

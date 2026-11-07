@@ -1,0 +1,70 @@
+name: Windows validation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      ocr:
+        description: Run PaddleOCR integration in a separate job
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: '1'
+
+jobs:
+  validate:
+    name: Windows ${{ matrix.suite }}
+    runs-on: windows-2025
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: ${{ fromJSON(inputs.ocr && '["core", "ocr"]' || '["core"]') }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13.7'
+      - name: Prepare the CJK test font
+        run: |
+          $font = Join-Path $env:RUNNER_TEMP 'NotoSansCJKsc-Regular.otf'
+          Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/notofonts/noto-cjk/Sans2.004/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf' -OutFile $font -TimeoutSec 60
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $font).Hash -ne '2C76254F6FC379FDDFCE0A7E84FB5385BB135D3E399294F6EEB6680D0365B74B') {
+            throw 'Test font SHA-256 mismatch'
+          }
+          "DOCSCAN_FONT=$font" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Install core and test dependencies
+        if: matrix.suite == 'core'
+        run: python -m pip install -e '.[test]'
+      - name: Install pinned OCR dependencies
+        if: matrix.suite == 'ocr'
+        run: |
+          python -m pip install -r requirements.win-py313.lock
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip install --no-build-isolation --no-deps -e .
+      - name: Check installed dependencies
+        run: python -m pip check
+      - name: Core tests and A4 PDF
+        if: matrix.suite == 'core'
+        run: |
+          python -m pytest -q -rs -m 'not ocr_integration'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m docscan to-pdf --input examples/synthetic/sample.jpg --source synthetic --page-format a4 --output outputs/ci_a4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -c "import pymupdf; pdf = pymupdf.open('outputs/ci_a4/book.pdf'); assert len(pdf) == 1 and pdf[0].get_images()[0][2:4] == (2480, 3508); print('A4 PDF verified at 300 DPI')"
+      - name: Verify pinned models and run OCR integration
+        if: matrix.suite == 'ocr'
+        run: |
+          python -m docscan prepare-models
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pytest -q -rs -m ocr_integration --junitxml=ocr-tests.xml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -c "from xml.etree import ElementTree as ET; cases = ET.parse('ocr-tests.xml').findall('.//testcase'); assert cases and all(case.find('skipped') is None for case in cases), 'OCR integration was skipped'; print(f'{len(cases)} OCR integration cases executed')"

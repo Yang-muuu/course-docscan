@@ -136,7 +136,7 @@ def scan(input_path: Path, corners: Path | None, output: Path, config: dict, opt
     if options["ocr"] == "paddle":
         from .ocr import PaddleEngine
 
-        engine = PaddleEngine(config["ocr"])
+        engine = PaddleEngine(config["ocr"], reading_order=options.get("reading_order", "rows"))
     batch = input_path.is_dir()
     if batch:
         inputs = sorted((p for p in input_path.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES),

@@ -67,7 +67,7 @@ def ocr_check(args: argparse.Namespace) -> int:
         run["source"] = identified_source(args.input, args.source)
         photo = load_photo(args.input)
         run.update(input_sha256=photo.sha256, input_size=photo.size)
-        engine = PaddleEngine(config["ocr"])
+        engine = PaddleEngine(config["ocr"], reading_order=args.reading_order)
         result = engine.recognize(photo.bgr, NORMALIZED_SPACE)
         run["outputs"] = save_ocr(path, result)
         run.update(status=result["status"], ocr=engine.metadata(), model_preparation=download_record(engine))
@@ -93,7 +93,7 @@ def make_samples(args: argparse.Namespace) -> int:
 def validate_data(args: argparse.Namespace) -> int:
     from .dataset import validate_data as validate
 
-    report = validate(args.manifest)
+    report = validate(args.manifest, require_real_plan=args.require_real_plan)
     show(report)
     return int(report["status"] != "ok")
 
@@ -109,7 +109,8 @@ def scan(args: argparse.Namespace) -> int:
         if value is not None:
             config[section][key] = value
     validate_config(config)
-    options = {key: getattr(args, key) for key in ("method", "ocr", "pdf_mode", "source", "page_orientation", "auto_first")}
+    options = {key: getattr(args, key) for key in ("method", "ocr", "pdf_mode", "source", "page_orientation", "auto_first",
+                                                    "reading_order")}
     result = run_scan(args.input, args.corners, args.output, config, options)
     show(result)
     return int(result["status"] != "ok")
@@ -133,7 +134,7 @@ def book(args: argparse.Namespace) -> int:
     if args.pdf_font is not None:
         config["pdf"]["font"] = str(args.pdf_font)
     options = {key: getattr(args, key) for key in ("layout", "gutter", "page_format", "page_orientation",
-                                                    "pdf_mode", "dewarp", "source", "dpi", "same_page")}
+                                                    "pdf_mode", "dewarp", "source", "dpi", "same_page", "reading_order")}
     result = convert_book(args.input, args.output, args.corners, config, options)
     show(result)
     return int(result["status"] != "ok")
@@ -143,8 +144,7 @@ def verify_pdf(args: argparse.Namespace) -> int:
     from .export_pdf import verify_pdf as verify
 
     expected = args.expected_text.read_text(encoding="utf-8-sig")
-    ocr = json.loads(args.ocr_json.read_text(encoding="utf-8-sig")) if args.ocr_json else None
-    show(verify(args.input, expected, args.keyword, ocr, args.background, args.render, page_number=args.page))
+    show(verify(args.input, expected, args.keyword, args.ocr_json, args.background, args.render, page_number=args.page))
     return 0
 
 
@@ -204,6 +204,8 @@ def parser() -> argparse.ArgumentParser:
     samples.set_defaults(handler=make_samples)
     validate = commands.add_parser("validate-data", help="Validate a dataset manifest and its files.")
     validate.add_argument("--manifest", type=Path, required=True)
+    validate.add_argument("--require-real-plan", action="store_true",
+                          help="Require 4 development and 6 test documents with four actual photos each.")
     validate.set_defaults(handler=validate_data)
     scanning = commands.add_parser("scan", help="Scan a JPG/PNG or a directory in stable order.")
     scanning.add_argument("--input", type=Path, required=True)
@@ -236,6 +238,9 @@ def parser() -> argparse.ArgumentParser:
     pages.add_argument("--pdf-font", type=Path)
     pages.add_argument("--source", choices=("real", "synthetic", "unspecified"), default="unspecified")
     pages.set_defaults(handler=book)
+    for command in (ocr, scanning, pages):
+        command.add_argument("--reading-order", choices=("rows", "two-column"), default="rows",
+                             help="Read by rows, or read left then right between headings crossing the page center.")
     pdf = commands.add_parser("verify-pdf", help="Check real text extraction, search, optional coordinates and rendering.")
     pdf.add_argument("--input", type=Path, required=True)
     pdf.add_argument("--expected-text", type=Path, required=True)

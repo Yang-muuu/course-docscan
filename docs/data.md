@@ -14,7 +14,7 @@
 ## 文件与字段
 
 1. 把照片、转录与角点文件放入 `data/real/` 下的目录。把 `manifest.example.csv` 复制为 `manifest.csv` 并填入每张实际照片的一行。路径均相对该 CSV。
-2. `image_id` 全局唯一，`doc_id` 对应文档内容。两者使用字母、数字、连字符、点或下划线，首字符为字母或数字。`split` 取 `dev` 或 `test`，`source` 取 `real`，`page_orientation` 取 `portrait` 或 `landscape`。`notes` 可以为空。
+2. `image_id` 全局唯一，`doc_id` 对应文档内容。两者使用字母、数字、连字符、点或下划线，首字符为字母或数字。`image_id` 须能作为 Windows 目录名，末尾用字母、数字、连字符或下划线，并避开 `CON`、`NUL`、`COM1` 等保留名称。`split` 取 `dev` 或 `test`，`source` 取 `real`，`page_orientation` 取 `portrait` 或 `landscape`。`notes` 可以为空。
 3. UTF-8 转录按单栏从上到下输入，保留中英文大小写、数字和标点。优先从实际打印源抄录，并对照纸面复核。实验前固定转录。OCR 预测独立输出，评价阶段才读取转录。
 4. 对 EXIF 归一化后的照片标四角，点顺序为左上、右上、右下、左下。`image_size` 用 `[宽, 高]`，坐标以左上角像素为 `(0, 0)`。如标注工具使用未旋转的原始像素，声明 `raw_image_pixels` 并填写原图尺寸，程序按 EXIF 转换。选填 `text_polygons`（每个正文区域四个顶点，同一坐标系），供自动定位评价检查文字是否被裁掉。
 
@@ -37,7 +37,9 @@ doc01-front_even,doc01,photos/doc01-front_even.jpg,transcripts/doc01.txt,corners
 ```
 
 ```powershell
-python -m docscan validate-data --manifest data/real/manifest.csv
+python -m docscan validate-data --manifest data/real/manifest.csv --require-real-plan
 ```
+
+收集过程中的部分数据可用普通 `validate-data` 检查。正式实验使用 `--require-real-plan`，同时校验真实来源、开发与测试文档数量，以及每份文档的四种条件各一张。
 
 `make-samples` 生成的是程序渲染的合成集。每页含合成标记，清单、数据集元数据及角点文件都记录 `synthetic`。角点和文字区域来自生成变换。字体与依赖相同、种子相同时可复核文件哈希。

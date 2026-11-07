@@ -6,7 +6,7 @@ from time import perf_counter
 import numpy as np
 
 from .common import DocscanError, elapsed_ms
-from .models import DEWARP_MODELS, configure_paddle_cache, model_hashes, model_status
+from .models import DEWARP_MODELS, configure_paddle_cache, invalid_model_paths, model_status
 
 
 class Dewarper:
@@ -24,8 +24,12 @@ class Dewarper:
         if self._failure is not None:
             raise self._failure
         start = perf_counter()
-        model = model_status(self.root, DEWARP_MODELS)["dewarp"]
         try:
+            status = model_status(self.root, DEWARP_MODELS)
+            model = status["dewarp"]
+            invalid = invalid_model_paths(status)
+            if invalid:
+                raise DocscanError("model_file_changed", f"Invalid UVDoc files: {', '.join(invalid)}. Move the cache directory aside and run prepare-models --dewarp.")
             if not model["ready"]:
                 raise DocscanError("dewarp_model_missing", "Run docscan prepare-models --dewarp to install UVDoc")
             configure_paddle_cache(self.root)
@@ -33,9 +37,8 @@ class Dewarper:
 
             predictor = TextImageUnwarping(model_name=model["name"], model_dir=model["directory"],
                                            device=self.device, enable_mkldnn=False, cpu_threads=self.threads)
-            weights = model_hashes(self.root, DEWARP_MODELS)["dewarp"]
             self._predictor = predictor
-            self.metadata.update(status="ok", load_ms=elapsed_ms(start), weights=weights)
+            self.metadata.update(status="ok", load_ms=elapsed_ms(start), weights=model["file_sha256"])
         except Exception as error:
             self._failure = error if isinstance(error, DocscanError) else DocscanError("dewarp_model_failed", str(error))
             self.metadata.update(status="error", load_ms=elapsed_ms(start), error=str(self._failure))

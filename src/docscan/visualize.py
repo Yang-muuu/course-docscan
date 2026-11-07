@@ -19,6 +19,11 @@ def read_run(path: Path, mode: str) -> dict:
         data = json.loads((path / "run.json").read_text(encoding="utf-8"))
         if data["command"] != "benchmark" or data["mode"] != mode:
             raise DocscanError("wrong_benchmark_mode", f"Expected {mode} benchmark: {path}")
+        prefix = "auto_" if mode == "auto" else ""
+        for output in ("results", "summary"):
+            digest = data.get(f"{output}_sha256")
+            if digest and file_sha256(path / f"{prefix}{output}.csv") != digest:
+                raise DocscanError("benchmark_artifact_changed", f"{prefix}{output}.csv differs from {path}/run.json")
         return data
     except (KeyError, TypeError, ValueError, OSError) as error:
         raise DocscanError("invalid_benchmark_run", f"Cannot read {path}/run.json: {error}") from error

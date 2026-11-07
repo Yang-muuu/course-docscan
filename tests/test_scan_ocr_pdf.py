@@ -1,5 +1,6 @@
 import json
 import shutil
+from hashlib import sha256
 from pathlib import Path
 
 import cv2
@@ -12,7 +13,7 @@ from docscan.common import dependency_versions
 from docscan.config import DEFAULTS
 from docscan.export_pdf import export_pdf, verify_pdf
 from docscan.image_io import NORMALIZED_SPACE, load_photo, write_png
-from docscan.models import model_status
+from docscan.models import MODEL_FILE_HASHES, MODEL_FILES, MODEL_NAMES, model_status, prepare_models
 from docscan.ocr import PaddleEngine, order_lines
 
 
@@ -53,6 +54,20 @@ def test_reading_order_sorts_rows_and_fragments():
     assert [line["reading_order"] for line in ordered] == [1, 2, 3]
 
 
+def test_two_column_order_respects_spanning_headings():
+    boxes = [
+        ("R2", 130, 70, 195), ("L1", 15, 40, 80), ("First heading", 15, 10, 195),
+        ("R1", 130, 40, 195), ("L2", 15, 70, 80), ("Next section", 20, 100, 188),
+        ("R3", 130, 130, 195), ("L3", 15, 130, 80),
+    ]
+    lines = [{"text": text, "polygon": [[x, y], [right, y], [right, y + 18], [x, y + 18]]}
+             for text, x, y, right in boxes]
+    ordered, text = order_lines(lines, column_split=100)
+    expected = ["First heading", "L1", "L2", "R1", "R2", "Next section", "L3", "R3"]
+    assert [line["text"] for line in ordered] == expected
+    assert text.splitlines() == expected
+
+
 def test_blank_photo_failure_and_explicit_manual_fallback(tmp_path):
     image, corners = tmp_path / "空白.png", tmp_path / "四角.json"
     write_png(image, np.full((240, 180, 3), 200, np.uint8))
@@ -77,6 +92,31 @@ def test_missing_model_is_error_even_on_blank(tmp_path):
     assert result["inference_attempted"] is False
 
 
+def test_model_cache_rechecks_file_hashes(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "models"
+    for name in MODEL_NAMES.values():
+        directory = root / name
+        directory.mkdir(parents=True)
+        hashes = {}
+        for filename in MODEL_FILES:
+            data = f"Test-only model bytes for {name}/{filename}".encode()
+            (directory / filename).write_bytes(data)
+            hashes[filename] = sha256(data).hexdigest()
+        monkeypatch.setitem(MODEL_FILE_HASHES, name, hashes)
+    assert prepare_models(root)["status"] == "ok"
+    damaged = root / MODEL_NAMES["detection"] / "inference.json"
+    damaged.write_text("Changed test fixture", encoding="utf-8")
+    config = tmp_path / "config.yaml"
+    config.write_text(f"ocr:\n  model_dir: {json.dumps(root.as_posix())}\n", encoding="utf-8")
+    assert main(["doctor", "--config", str(config)]) == 0
+    readiness = json.loads(capsys.readouterr().out)["models"]["detection"]
+    assert not readiness["ready"] and readiness["invalid"] == [damaged.name]
+    result = prepare_models(root)
+    assert result["status"] == "error"
+    assert result["models"][MODEL_NAMES["detection"]]["error_code"] == "model_file_changed"
+    assert damaged.name in result["models"][MODEL_NAMES["detection"]]["error"]
+
+
 def test_pdf_geometry_with_explicit_test_text(tmp_path):
     # Hand-specified polygons test the PDF adapter without claiming OCR inference.
     image = np.full((120, 250), 230, dtype=np.uint8)
@@ -88,6 +128,25 @@ def test_pdf_geometry_with_explicit_test_text(tmp_path):
     assert export_pdf(target, image, annotation, DEFAULTS["pdf"])["searchable"]
     report = verify_pdf(target, annotation["full_text"], "中文", annotation, background)
     assert report["keyword_hits"] == 1 and report["position_checked"] and report["render_equals_image_only"]
+
+
+@pytest.mark.parametrize("invalid", [
+    None, {}, {"image_size": [0, 20], "lines": []},
+    {"image_size": [120, 100], "lines": [{"text": "Bad", "polygon": [[1, 2], [2, 3]]}]},
+])
+def test_verify_pdf_rejects_invalid_explicit_ocr_json(tmp_path, capsys, invalid):
+    metadata = {"status": "ok", "image_size": [120, 100], "full_text": "Test page",
+                "lines": [{"text": "Test page", "polygon": [[8, 9], [105, 9], [105, 30], [8, 30]]}]}
+    pdf, expected, positions = tmp_path / "image.pdf", tmp_path / "expected.txt", tmp_path / "ocr.json"
+    export_pdf(pdf, np.full((100, 120), 255, dtype=np.uint8), metadata, DEFAULTS["pdf"])
+    expected.write_text(metadata["full_text"], encoding="utf-8")
+    positions.write_text(json.dumps(invalid), encoding="utf-8")
+    command = ["verify-pdf", "--input", str(pdf), "--expected-text", str(expected), "--ocr-json", str(positions)]
+    assert main(command) == 1
+    assert "invalid_ocr_json" in capsys.readouterr().err
+    positions.write_text(json.dumps(metadata), encoding="utf-8")
+    assert main(command) == 0
+    assert json.loads(capsys.readouterr().out)["position_checked"]
 
 
 @pytest.mark.ocr_integration

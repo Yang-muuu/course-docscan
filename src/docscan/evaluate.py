@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
 from statistics import mean, median
@@ -12,7 +13,7 @@ import yaml
 
 from .common import (METHODS, DocscanError, elapsed_ms, error_record, file_sha256, finish_run,
                      json_sha256, new_run, read_csv, run_metadata, utc_now, write_csv, write_json)
-from .dataset import CONDITIONS, Record, identified_source, read_manifest, reference_text
+from .dataset import CONDITIONS, Record, identified_source, manifest_image_hashes, read_manifest, reference_text
 from .enhance import gray_image, make_variants
 from .geometry import corner_overlay, detect_page, load_annotation, warp_document
 from .image_io import NORMALIZED_SPACE, WARPED_SPACE, load_photo, write_png
@@ -33,6 +34,7 @@ AUTO_SUMMARY_FIELDS = ("run_id", "source", "split", "condition", "expected", "ev
                        "geometry_passed", "geometry_pass_rate", "text_annotated", "auto_verified",
                        "auto_verified_rate_on_annotated", "manual_rescues", "errors")
 OCR_MEASURED = {"ok", "no_text"}
+SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 def _keys(record: Record, run_id: str) -> dict:
@@ -50,16 +52,24 @@ def _annotation(record: Record, photo):
     return data
 
 
-def _shared_rows(record: Record, path: Path, run_id: str, config: dict, engine, references: dict) -> list[dict]:
+def _benchmark_photo(record: Record, image_hash: str | None):
+    identified_source(record.image_path, record.source)
+    photo = load_photo(record.image_path)
+    if photo.sha256 != image_hash:
+        raise DocscanError("input_changed", f"Image changed after preflight: {record.image_id}")
+    return photo
+
+
+def _shared_rows(record: Record, path: Path, run_id: str, config: dict, engine, references: dict,
+                 image_hash: str | None) -> list[dict]:
     from .ocr import save_ocr
 
     common = _keys(record, run_id)
     folder = path / "pages" / record.image_id
     folder.mkdir(parents=True)
     try:
-        identified_source(record.image_path, record.source)
         start = perf_counter()
-        photo = load_photo(record.image_path)
+        photo = _benchmark_photo(record, image_hash)
         decode_ms = elapsed_ms(start)
         common.update(input_sha256=photo.sha256, input_width=photo.size[0], input_height=photo.size[1])
         reference = reference_text(record.gt_text_path)
@@ -161,11 +171,10 @@ def summarize_rows(rows: list[dict]) -> list[dict]:
     return summaries
 
 
-def _auto_row(record: Record, path: Path, run_id: str, config: dict) -> dict:
+def _auto_row(record: Record, path: Path, run_id: str, config: dict, image_hash: str | None) -> dict:
     row = {**_keys(record, run_id), "status": "error", "manual_rescue": "not_attempted"}
     try:
-        identified_source(record.image_path, record.source)
-        photo = load_photo(record.image_path)
+        photo = _benchmark_photo(record, image_hash)
         row.update(input_sha256=photo.sha256, input_width=photo.size[0], input_height=photo.size[1])
         annotation = _annotation(record, photo)
         row["corners_sha256"] = file_sha256(record.corners_path)
@@ -231,6 +240,32 @@ def _summarize_auto(rows: list[dict]) -> list[dict]:
     return summaries
 
 
+def _development_inputs(run: dict, rows: list[dict]) -> dict[str, tuple]:
+    if not rows or len(rows) != run.get("rows_expected") or len(rows) != run.get("rows_measured"):
+        raise DocscanError("invalid_development_run", "Result row count differs from the development run")
+    inputs, methods = {}, defaultdict(set)
+    for row in rows:
+        image_id, method = row.get("image_id"), row.get("method")
+        identity = row.get("run_id"), row.get("split"), row.get("source")
+        if (identity != (run["run_id"], "dev", run["source"]) or row.get("status") not in OCR_MEASURED
+                or not image_id or method not in METHODS or method in methods[image_id]):
+            raise DocscanError("invalid_development_run", "Unexpected or duplicate image/method in development results")
+        metadata = (row.get("doc_id"), *(row.get(key) for key in PROVENANCE[:3]), row.get("condition"))
+        if (not metadata[0] or metadata[-1] not in CONDITIONS
+                or any(not SHA256.fullmatch(value or "") for value in metadata[1:4])
+                or inputs.setdefault(image_id, metadata) != metadata):
+            raise DocscanError("invalid_development_run", f"Inconsistent provenance for development image {image_id}")
+        methods[image_id].add(method)
+    if (len(inputs) != run.get("complete_pairs")
+            or any(group != set(METHODS) for group in methods.values())):
+        raise DocscanError("invalid_development_run", "Development results must include all six methods for each image")
+    fingerprints = {image_id: list(metadata[1:4]) for image_id, metadata in inputs.items()}
+    if (json_sha256(fingerprints) != run.get("input_sha256")
+            or len({metadata[1] for metadata in inputs.values()}) != len(inputs)):
+        raise DocscanError("invalid_development_run", "Development input fingerprints differ or contain duplicate images")
+    return inputs
+
+
 def freeze_config(dev_run: Path, output: Path, note: str) -> dict:
     run = json.loads((dev_run / "run.json").read_text(encoding="utf-8"))
     if (run.get("command"), run.get("mode"), run.get("split"), run.get("status")) != (
@@ -240,14 +275,19 @@ def freeze_config(dev_run: Path, output: Path, note: str) -> dict:
     models = run["ocr"]["model_file_sha256"]
     if json_sha256(config) != run["config_sha256"] or not models:
         raise DocscanError("invalid_development_run", "Development config or model hashes are missing or inconsistent")
-    rows = read_csv(dev_run / "results.csv")
-    if not rows or any((row["run_id"], row["split"], row["source"], row["status"] in OCR_MEASURED) !=
-                       (run["run_id"], "dev", run["source"], True) for row in rows):
-        raise DocscanError("invalid_development_run", "Development result rows do not match the run")
+    results_path = dev_run / "results.csv"
+    results_hash = file_sha256(results_path)
+    if "results_sha256" in run and run["results_sha256"] != results_hash:
+        raise DocscanError("invalid_development_run", "Development results CSV no longer matches its recorded SHA-256")
+    inputs = _development_inputs(run, read_csv(results_path))
+    if file_sha256(results_path) != results_hash:
+        raise DocscanError("invalid_development_run", "Development results changed while being read")
     freeze = {"source": run["source"], "dev_run_id": run["run_id"], "frozen_at_utc": utc_now(),
               "config_sha256": run["config_sha256"], "dev_manifest_sha256": run["manifest_sha256"],
-              "dev_input_sha256": run["input_sha256"], "model_file_sha256": models,
-              "dev_doc_ids": sorted({row["doc_id"].casefold() for row in rows}),
+              "dev_input_sha256": run["input_sha256"], "dev_results_sha256": results_hash,
+              "model_file_sha256": models,
+              "dev_doc_ids": sorted({metadata[0].casefold() for metadata in inputs.values()}),
+              "dev_image_sha256": {image_id: metadata[1] for image_id, metadata in sorted(inputs.items())},
               "runtime_versions": {name: run["dependencies"][name] for name in ("paddlepaddle", "paddleocr", "paddlex")},
               "selection_note": note}
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -256,7 +296,7 @@ def freeze_config(dev_run: Path, output: Path, note: str) -> dict:
     return {"status": "ok", "config": str(output), **freeze}
 
 
-def _warm_engine(engine, records: list[Record]) -> dict:
+def _warm_engine(engine, records: list[Record], hashes: dict[str, str]) -> dict:
     from .ocr import download_record
 
     result = {"status": "error", "attempts": []}
@@ -267,8 +307,7 @@ def _warm_engine(engine, records: list[Record]) -> dict:
         return result
     for record in records:
         try:
-            identified_source(record.image_path, record.source)
-            photo = load_photo(record.image_path)
+            photo = _benchmark_photo(record, hashes.get(record.image_id))
         except DocscanError as error:
             result["attempts"].append({"image_id": record.image_id, "status": "error", **error_record(error)})
             continue
@@ -280,6 +319,33 @@ def _warm_engine(engine, records: list[Record]) -> dict:
             break
     result["model_preparation"] = download_record(engine)
     return result
+
+
+def _check_frozen_split(freeze: dict, run: dict, records: list[Record], development: list[Record],
+                        hashes: dict[str, str]) -> None:
+    dev_docs = freeze.get("dev_doc_ids")
+    if dev_docs is not None:
+        if not isinstance(dev_docs, list) or not all(isinstance(doc_id, str) for doc_id in dev_docs):
+            raise DocscanError("invalid_config", "Frozen development IDs must be a list of strings")
+        if {doc_id.casefold() for doc_id in dev_docs} & {record.doc_id.casefold() for record in records}:
+            raise DocscanError("document_split_leak", "A test document was present in the frozen development run")
+    dev_images = freeze.get("dev_image_sha256")
+    if dev_docs is None or dev_images is None:
+        if freeze.get("dev_manifest_sha256") != run["manifest_sha256"]:
+            raise DocscanError("manifest_differs_from_freeze", "Re-freeze development results to use a different manifest")
+        fingerprints = {record.image_id: [hashes.get(record.image_id), file_sha256(record.gt_text_path),
+                                         file_sha256(record.corners_path)] for record in development}
+        if not fingerprints or json_sha256(fingerprints) != freeze.get("dev_input_sha256"):
+            raise DocscanError("development_inputs_changed", "Re-freeze development results after changing legacy inputs")
+        if dev_images is None:
+            dev_images = {image_id: values[0] for image_id, values in fingerprints.items()}
+    if (not isinstance(dev_images, dict) or not dev_images
+            or not all(isinstance(digest, str) and SHA256.fullmatch(digest) for digest in dev_images.values())):
+        raise DocscanError("invalid_config", "Frozen development image hashes must be a nonempty SHA-256 mapping")
+    dev_hashes = set(dev_images.values())
+    for record in records:
+        if hashes.get(record.image_id) in dev_hashes:
+            raise DocscanError("image_split_leak", f"Test image {record.image_id} is identical to a frozen development input")
 
 
 def benchmark(manifest: Path, output: Path, source: str, split: str, mode: str,
@@ -296,46 +362,45 @@ def benchmark(manifest: Path, output: Path, source: str, split: str, mode: str,
         (path / "config.yaml").write_text(yaml.safe_dump({**config, **({"freeze": freeze} if freeze else {})},
                                                        sort_keys=False, allow_unicode=True), encoding="utf-8")
         run["outputs"]["config"] = "config.yaml"
-        records = sorted((row for row in read_manifest(manifest) if (row.source, row.split) == (source, split)),
-                         key=lambda row: row.image_id.casefold())
         run["manifest_sha256"] = file_sha256(manifest)
+        source_records = [row for row in read_manifest(manifest) if row.source == source]
+        if file_sha256(manifest) != run["manifest_sha256"]:
+            raise DocscanError("input_changed", "Manifest changed while being read")
+        records = sorted((row for row in source_records if row.split == split), key=lambda row: row.image_id.casefold())
         if not records:
             raise DocscanError("no_selected_data", f"No records for {source}/{split}")
-        doc_conditions = defaultdict(set)
+        hashes = manifest_image_hashes(source_records)
+        doc_conditions = defaultdict(Counter)
         for record in records:
-            doc_conditions[record.doc_id.casefold()].add(record.condition)
+            doc_conditions[record.doc_id.casefold()][record.condition] += 1
         planned = {"dev": 4, "test": 6}[split]
-        all_conditions = sum(len(conditions) == len(CONDITIONS) for conditions in doc_conditions.values())
+        expected_conditions = Counter(CONDITIONS)
+        all_conditions = sum(conditions == expected_conditions for conditions in doc_conditions.values())
         run["dataset"] = {"images": len(records), "documents": len(doc_conditions), "four_condition_docs": all_conditions,
                           "conditions": dict(Counter(row.condition for row in records)),
                           "status": "synthetic_validation" if source == "synthetic" else
                           "plan_met" if all_conditions >= planned else "partial_dataset"}
+        if split == "test" and (mode == "shared-corners" or freeze is not None):
+            if (not freeze or freeze.get("source") != source or not freeze.get("dev_run_id") or
+                    freeze.get("config_sha256") != run["config_sha256"] or
+                    (mode == "shared-corners" and not freeze.get("model_file_sha256"))):
+                raise DocscanError("config_not_frozen", f"Run a {source}/dev benchmark and freeze its config before test")
+            _check_frozen_split(freeze, run, records, [row for row in source_records if row.split == "dev"], hashes)
         if mode == "shared-corners":
             from .ocr import PaddleEngine
 
-            if split == "test" and (not freeze or freeze.get("source") != source or not freeze.get("dev_run_id") or
-                                    not freeze.get("model_file_sha256") or freeze.get("config_sha256") != run["config_sha256"]):
-                raise DocscanError("config_not_frozen", f"Run a {source}/dev benchmark and freeze its config before test")
-            engine = PaddleEngine(config["ocr"])
             if split == "test":
-                dev_docs = freeze.get("dev_doc_ids")
-                if dev_docs is None:
-                    if freeze.get("dev_manifest_sha256") != run["manifest_sha256"]:
-                        raise DocscanError("manifest_differs_from_freeze", "This freeze requires the original manifest")
-                elif not isinstance(dev_docs, list) or not all(isinstance(doc_id, str) for doc_id in dev_docs):
-                    raise DocscanError("invalid_config", "Frozen development IDs must be a list of strings")
-                elif set(dev_docs) & doc_conditions.keys():
-                    raise DocscanError("document_split_leak", "A test document was present in the frozen development run")
                 expected_runtime = {name: run["dependencies"][name] for name in ("paddlepaddle", "paddleocr", "paddlex")}
                 if all(expected_runtime.values()) and expected_runtime != freeze.get("runtime_versions"):
                     raise DocscanError("runtime_differs_from_freeze", "Test OCR dependency versions differ from development")
-            run["warmup"] = _warm_engine(engine, records)
+            engine = PaddleEngine(config["ocr"])
+            run["warmup"] = _warm_engine(engine, records, hashes)
             run["ocr"] = engine.metadata()
             if split == "test" and engine.model_file_sha256 and engine.model_file_sha256 != freeze["model_file_sha256"]:
                 raise DocscanError("models_differ_from_freeze", "Test model files differ from the frozen development run")
             references = {}
             for record in records:
-                rows.extend(_shared_rows(record, path, run_id, config, engine, references))
+                rows.extend(_shared_rows(record, path, run_id, config, engine, references, hashes.get(record.image_id)))
             summaries = summarize_rows(rows)
             successful = sum(row["status"] in OCR_MEASURED for row in rows)
             run.update(rows_expected=len(records) * len(METHODS), rows_measured=successful,
@@ -345,7 +410,7 @@ def benchmark(manifest: Path, output: Path, source: str, split: str, mode: str,
                                      "excludes": "annotation and reference I/O, exports, CER, download, load and warm-up"})
         else:
             for record in records:
-                rows.append(_auto_row(record, path, run_id, config))
+                rows.append(_auto_row(record, path, run_id, config, hashes.get(record.image_id)))
             summaries = _summarize_auto(rows)
             successful = sum(row["status"] == "ok" for row in rows)
             run.update(rows_expected=len(records), rows_measured=successful,
@@ -361,6 +426,7 @@ def benchmark(manifest: Path, output: Path, source: str, split: str, mode: str,
         run["input_sha256"] = json_sha256(fingerprints) if fingerprints else None
         write_csv(path / names[0], columns[0], rows)
         write_csv(path / names[1], columns[1], summaries)
+        run.update(results_sha256=file_sha256(path / names[0]), summary_sha256=file_sha256(path / names[1]))
         run["outputs"].update(results=names[0], summary=names[1])
         run["elapsed_ms"]["total_wall"] = elapsed_ms(start)
         finish_run(path, run)

@@ -47,12 +47,18 @@ def _recognize(engine, image: np.ndarray, folder: Path, entry: dict) -> tuple[Pa
 
 
 def _fuse_book_page(root: Path, run: dict, sources: list[PdfSource], engine) -> tuple[PdfSource, str]:
-    from .capture_fusion import fuse_captures
+    from .capture_fusion import CaptureMismatch, fuse_captures
 
     captures = run["pages"]
     if any("geometry" not in page or any(page["frame_edges_touched"].values()) for page in captures):
         raise DocscanError("incomplete_capture", "Same-page fusion requires a complete sheet in every photo")
-    merged, anchor, registration = fuse_captures([load_photo(source.image).bgr for source in sources])
+    try:
+        merged, anchor, registration = fuse_captures([load_photo(source.image).bgr for source in sources])
+    except CaptureMismatch as error:
+        run["fusion"] = {"status": "needs_review", **error.evidence}
+        for page in captures:
+            page["needs_review"] = True
+        raise
     parent = captures[anchor]
     mask = load_photo(root / parent["mask"]).bgr[:, :, 0]
     merged[mask == 0] = 255
@@ -67,7 +73,7 @@ def _fuse_book_page(root: Path, run: dict, sources: list[PdfSource], engine) -> 
     for capture in run["images"]:
         capture["capture_pages"] = capture["pages"]
         capture["pages"] = [1]
-    run["fusion"] = {"anchor_capture": anchor + 1, "registration": registration}
+    run["fusion"] = {"status": "ok", "anchor_capture": anchor + 1, "registration": registration}
     return PdfSource(path, ocr_path, sources[anchor].page_size), text
 
 
@@ -96,7 +102,7 @@ def convert_book(input_path: Path, output: Path, corners_path: Path | None, conf
         if options["pdf_mode"] == "searchable":
             from .ocr import PaddleEngine
 
-            engine = PaddleEngine(config["ocr"])
+            engine = PaddleEngine(config["ocr"], reading_order=options.get("reading_order", "rows"))
         if options["dewarp"] == "uvdoc":
             from .dewarp import Dewarper
 

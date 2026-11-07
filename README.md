@@ -37,7 +37,7 @@ $py = '.\.venv\Scripts\python.exe'
 & $py -m docscan scan --input examples/synthetic/sample.jpg --corners examples/synthetic/sample.corners.json --method E --ocr none --pdf-mode image --output outputs/quick_image
 ```
 
-首次使用 OCR 时下载两份官方 PP-OCRv5 权重并校验归档哈希。以后保留 `.models` 即可离线运行，`doctor` 只检查本地文件。可通过 YAML 的 `ocr.model_dir` 指向另一处已准备的权重目录。CPU 推理关闭了文档方向、文档展平、文字行方向和 MKL-DNN。模型识别错误、空图和缺权重分别保留状态。
+首次使用 OCR 时下载两份官方 PP-OCRv5 权重并校验归档哈希。离线运行时，`doctor` 与模型加载都核对缓存文件的 SHA-256。可通过 YAML 的 `ocr.model_dir` 指向另一处已准备的权重目录。CPU 推理关闭了文档方向、文档展平、文字行方向和 MKL-DNN。模型识别错误、空图、缺权重和缓存损坏分别保留状态。
 
 ```powershell
 & $py -m docscan prepare-models
@@ -60,7 +60,7 @@ $py = '.\.venv\Scripts\python.exe'
 & $py -m docscan to-pdf --input '书页照片目录' --layout spread --output outputs/book_pdf
 ```
 
-同一张完整纸页拍了 2 至 4 次时，可以把这些照片放在一个目录，用 `--same-page` 配准并合成一页。程序检查匹配点的覆盖、全页和局部印刷内容的一致性，并在 `run.json` 记录配准结果。该模式使用 `--layout single` 和 `--dewarp none`。
+同一张完整纸页拍了 2 至 4 次时，可以把这些照片放在一个目录，用 `--same-page` 配准并合成一页。程序检查匹配点覆盖、全页墨迹及局部字形。`run.json` 保留光流微调前后的差异区域和局部平移比对结果。疑似内容冲突时返回 `capture_mismatch`，分开保存已处理的页图，供 `review_pages` 复查。该模式使用 `--layout single` 和 `--dewarp none`。
 
 ```powershell
 & $py -m docscan to-pdf --input '同一页照片目录' --same-page --output outputs/merged_page
@@ -76,6 +76,8 @@ $py = '.\.venv\Scripts\python.exe'
 ```
 
 `--pdf-mode searchable` 为每个处理后的页面加可搜索文字层，使用前先准备 OCR 权重。严重弯曲的单页可选 UVDoc，建议对照 `before_dewarp.png` 检查展平效果。两种默认图像流程使用现有图像处理依赖即可。
+
+双栏排版可加 `--reading-order two-column`。程序按每页中线分栏，在跨栏标题之间先读左栏再读右栏。默认 `rows` 按行读取，适合单栏。两个选项也可用于 `scan` 和 `ocr-check`。传给 `verify-pdf --ocr-json` 的文件应包含图像宽高、识别行文本和四边形坐标。
 
 ```powershell
 & $py -m docscan prepare-models --dewarp
@@ -100,10 +102,10 @@ $py = '.\.venv\Scripts\python.exe'
 
 ## 真实实验
 
-按 [拍摄与数据导入](docs/data.md) 准备 `data/real/manifest.csv`。先在真实开发集运行并选参。以下命令使用默认配置作为真实开发起点。可对照 `configs/dev_wide.yaml`，选定后把对应开发运行目录传给 `freeze-config`。
+按 [拍摄与数据导入](docs/data.md) 准备 `data/real/manifest.csv`。正式对照先核对 4 份开发文档和 6 份测试文档，每份四种拍摄条件各一张。以下命令使用默认配置作为真实开发起点。可对照 `configs/dev_wide.yaml`，选定后把对应开发运行目录传给 `freeze-config`。
 
 ```powershell
-& $py -m docscan validate-data --manifest data/real/manifest.csv
+& $py -m docscan validate-data --manifest data/real/manifest.csv --require-real-plan
 & $py -m docscan benchmark --manifest data/real/manifest.csv --split dev --source real --config configs/default.yaml --output outputs/real_dev
 & $py -m docscan freeze-config --dev-run outputs/real_dev --output configs/experiment.real.yaml
 & $py -m docscan benchmark --manifest data/real/manifest.csv --split test --source real --config configs/experiment.real.yaml --output outputs/real_benchmark
@@ -121,11 +123,15 @@ CER 对预测和真值采用 NFKC、去空白后做字符编辑对齐，保留�
 & $py -m pytest -m ocr_integration
 ```
 
+GitHub 的 [Windows validation](.github/workflows/windows.yml) 在推送和拉取请求中安装核心依赖、运行回归测试并核对合成 A4 PDF。在 Actions 手动运行时启用 `ocr`，会增加独立的 OCR 集成任务，校验模型文件并确认集成用例实际执行。
+
 | 错误或状态 | 处理 |
 | --- | --- |
 | `detection_failed` | 用角点叠加图或输入图复核边界，再传 `--corners`。A 组原图 OCR 可独立使用。 |
 | `invalid_corners` | 检查坐标系、EXIF 归一化尺寸及左上、右上、右下、左下顺序。 |
 | `ocr_model_missing` | 运行 `prepare-models`，或将两份已准备的权重放入配置目录。 |
+| `model_file_changed` | 根据报错定位缓存文件。移开相应模型目录，再运行 `prepare-models` 或 `prepare-models --dewarp`。 |
+| `invalid_ocr_json` | 使用对应扫描的 `ocr.json`，复核文件中的图像宽高、识别行与坐标。 |
 | 首次 Paddle 导入遇到缓存权限 | Paddle 3.3.0 首次导入会初始化用户缓存目录。用可写用户缓存的本地环境初始化后，可继续离线执行。 |
 | venv 或 pytest 的临时目录权限错误 | 将当前 PowerShell 进程的 `TEMP` 和 `TMP` 指向项目内可写目录，再建 venv 或运行测试。 |
 | `no_searchable_text` | OCR 返回空结果。`ocr.json` 保留 `no_text`，如需查看图像版请用 `--pdf-mode image`。 |

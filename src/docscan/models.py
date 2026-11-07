@@ -19,6 +19,23 @@ ARCHIVE_HASHES = {
     "PP-OCRv5_mobile_rec": "566b9512b34e34a9f0db54d87b51fa5a0b9ed2cf1ab7e49728cc0b8b5a64f414",
     "UVDoc": "15d79c6bcbf738b7e132eedff6ed57c7e834c73cbc140a1fff8fd8ab9c2a35b9",
 }
+MODEL_FILE_HASHES = {
+    "PP-OCRv5_mobile_det": {
+        "inference.json": "05feef1acb00aa4cd7362b15f7f501fc4f99d7b1fa73c1c871e0c7b1504b0f5c",
+        "inference.pdiparams": "afa1820cb16c1fd0dad589d0f8b389139061c1ef6d68019685fd07be997dda5b",
+        "inference.yml": "98069072e1b6b37d727fd9d9f11725faa46d6ea0de012f2ed26caea011c37699",
+    },
+    "PP-OCRv5_mobile_rec": {
+        "inference.json": "24587345250c7332d0fc6f9a44e794d078cdaeb64c302fef906f325619de2569",
+        "inference.pdiparams": "2460da90875937c94db97eba74ae3d9e5d4c4c57c42f1f41531c09a26bcc771a",
+        "inference.yml": "5dfeb2777f6d0db8177d8128a8acfcf6e6276dc4ac73ea3bf0dc06d6a5e85d8e",
+    },
+    "UVDoc": {
+        "inference.json": "2c2bc3e0f15e782cf8f2ad411b5033d99ca504fe88648f8054a5e925ba2336e0",
+        "inference.pdiparams": "810488899520e0da843b9bd9769ba4949f1c81e357f0eceb12d4a7da459c3eca",
+        "inference.yml": "be83d537b358f3ff87740e77e14a83ee9e9a7bb215c33d091b69e8bd5904fe39",
+    },
+}
 
 
 def configure_paddle_cache(root: Path) -> None:
@@ -26,13 +43,30 @@ def configure_paddle_cache(root: Path) -> None:
     os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(root / ".paddlex"))
 
 
+def _inspect_model(folder: Path, name: str) -> dict:
+    expected = MODEL_FILE_HASHES[name]
+    missing, invalid, hashes = [], [], {}
+    for filename in sorted(MODEL_FILES):
+        path = folder / filename
+        try:
+            hashes[filename] = file_sha256(path)
+        except FileNotFoundError:
+            missing.append(filename)
+        except OSError:
+            invalid.append(filename)
+        else:
+            if hashes[filename] != expected[filename]:
+                invalid.append(filename)
+    return {"name": name, "directory": str(folder), "ready": not (missing or invalid), "missing": missing,
+            "invalid": invalid, "file_sha256": hashes}
+
+
 def model_status(root: Path, models: dict[str, str] = MODEL_NAMES) -> dict:
-    result = {}
-    for role, name in models.items():
-        folder = root / name
-        missing = sorted(item for item in MODEL_FILES if not (folder / item).is_file())
-        result[role] = {"name": name, "directory": str(folder), "ready": not missing, "missing": missing}
-    return result
+    return {role: _inspect_model(root / name, name) for role, name in models.items()}
+
+
+def invalid_model_paths(status: dict) -> list[str]:
+    return [str(Path(model["directory"]) / name) for model in status.values() for name in model["invalid"]]
 
 
 def model_hashes(root: Path, models: dict[str, str] = MODEL_NAMES) -> dict:
@@ -63,9 +97,13 @@ def prepare_models(root: Path, *, dewarp: bool = False) -> dict:
         entry = {"url": url}
         entries[name] = entry
         try:
-            if all((target / item).is_file() for item in MODEL_FILES):
+            existing = _inspect_model(target, name)
+            if existing["ready"]:
                 entry["status"] = "already_available"
                 continue
+            if existing["invalid"]:
+                paths = ", ".join(invalid_model_paths({name: existing}))
+                raise DocscanError("model_file_changed", f"Cache checksum or read error: {paths}. Move {target} aside and prepare again.")
             if target.exists():
                 raise DocscanError("incomplete_model_dir", f"Move the incomplete model directory aside: {target}")
             with TemporaryDirectory(dir=root) as staging:
@@ -78,6 +116,8 @@ def prepare_models(root: Path, *, dewarp: bool = False) -> dict:
                 if entry["archive_sha256"] != ARCHIVE_HASHES[name]:
                     raise DocscanError("model_archive_changed", f"Unexpected SHA-256 for {name}")
                 _extract_model(tar_path, stage / "model")
+                if not _inspect_model(stage / "model", name)["ready"]:
+                    raise DocscanError("model_file_changed", f"Extracted model files failed checksum verification: {name}")
                 (stage / "model").rename(target)
                 entry["status"] = "downloaded"
         except (OSError, tarfile.TarError, DocscanError) as error:

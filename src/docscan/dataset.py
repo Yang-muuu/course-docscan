@@ -7,7 +7,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from .common import CONDITIONS, DocscanError
+from .common import CONDITIONS, DocscanError, file_sha256
 from .geometry import load_annotation
 from .image_io import load_photo
 from .metrics import normalize_text
@@ -16,6 +16,7 @@ SOURCES = ("real", "synthetic")
 SPLITS = ("dev", "test")
 MANIFEST_FIELDS = ("image_id", "doc_id", "image_path", "gt_text_path", "corners_path",
                    "split", "condition", "source", "page_orientation", "notes")
+WINDOWS_DEVICE_NAME = re.compile(r"(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,9 @@ def read_manifest(path: Path) -> list[Record]:
                     for field in ("image_id", "doc_id"):
                         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}", data[field]):
                             raise ValueError(f"Invalid {field}: {data[field]!r}")
+                    image_id = data["image_id"]
+                    if image_id.endswith(".") or WINDOWS_DEVICE_NAME.fullmatch(image_id.split(".", 1)[0]):
+                        raise ValueError(f"image_id cannot be used as a Windows directory name: {image_id!r}")
                     choices = {"split": SPLITS, "condition": CONDITIONS, "source": SOURCES,
                                "page_orientation": ("portrait", "landscape")}
                     for field, allowed in choices.items():
@@ -103,7 +107,47 @@ def reference_text(path: Path) -> str:
     return text
 
 
-def validate_data(path: Path) -> dict:
+def _require_unique_image(record: Record, digest: str, seen: dict[str, str]) -> None:
+    first_id = seen.setdefault(digest, record.image_id)
+    if first_id != record.image_id:
+        raise DocscanError("duplicate_image_bytes", f"{record.image_id} has the same image bytes as {first_id}")
+
+
+def manifest_image_hashes(records: list[Record]) -> dict[str, str]:
+    """Fingerprint readable inputs before a benchmark can run inference."""
+    seen, hashes = {}, {}
+    for record in records:
+        try:
+            digest = file_sha256(record.image_path)
+        except OSError:
+            # Keep unreadable inputs in the benchmark's per-image failure records.
+            continue
+        _require_unique_image(record, digest, seen)
+        hashes[record.image_id] = digest
+    return hashes
+
+
+def _real_plan(records: list[Record]) -> tuple[dict, list[dict]]:
+    required = {"dev": 4, "test": 6}
+    documents: dict[tuple[str, str], Counter] = {}
+    errors = []
+    for record in records:
+        if record.source != "real":
+            errors.append({"image_id": record.image_id, "error_code": "real_plan_requires_real_source",
+                           "error": "The course experiment plan requires actual photos"})
+            continue
+        documents.setdefault((record.split, record.doc_id.casefold()), Counter())[record.condition] += 1
+    expected_conditions = Counter(CONDITIONS)
+    counts = {split: sum(key[0] == split for key in documents) for split in required}
+    incomplete = [doc_id for (_, doc_id), conditions in documents.items() if conditions != expected_conditions]
+    if counts != required or incomplete:
+        errors.append({"error_code": "real_plan_incomplete",
+                       "error": "Expected four development and six test documents with one photo per condition",
+                       "documents_without_four_distinct_conditions": incomplete})
+    return {"required_documents": required, "documents": counts, "ready": not errors}, errors
+
+
+def validate_data(path: Path, *, require_real_plan: bool = False) -> dict:
     rows = read_manifest(path)
     references, hashes, errors = {}, {}, []
     for row in rows:
@@ -116,13 +160,14 @@ def validate_data(path: Path) -> dict:
             text = reference_text(row.gt_text_path)
             if references.setdefault(row.doc_id.casefold(), text) != text:
                 raise DocscanError("inconsistent_reference", f"Different transcriptions for {row.doc_id}")
-            first_id = hashes.setdefault(photo.sha256, row.image_id)
-            if first_id != row.image_id:
-                raise DocscanError("duplicate_image_bytes", f"Same image bytes as {first_id}")
+            _require_unique_image(row, photo.sha256, hashes)
         except DocscanError as error:
             errors.append({"image_id": row.image_id, "error_code": error.code, "error": str(error)})
     counts = Counter((row.source, row.split) for row in rows)
-    return {"status": "error" if errors else "ok", "manifest": str(path), "images": len(rows),
-            "documents": len({row.doc_id.casefold() for row in rows}),
-            "counts": {f"{source}/{split}": count for (source, split), count in sorted(counts.items())},
-            "errors": errors}
+    report = {"manifest": str(path), "images": len(rows), "documents": len({row.doc_id.casefold() for row in rows}),
+              "counts": {f"{source}/{split}": count for (source, split), count in sorted(counts.items())}}
+    if require_real_plan:
+        plan, plan_errors = _real_plan(rows)
+        errors.extend(plan_errors)
+        report["real_plan"] = {**plan, "ready": not errors}
+    return {**report, "status": "error" if errors else "ok", "errors": errors}

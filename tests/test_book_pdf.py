@@ -215,16 +215,7 @@ def test_damaged_file_does_not_publish_an_incomplete_book(tmp_path):
     assert not (output / "book.pdf").exists()
 
 
-@pytest.mark.parametrize("different", [False, True])
-def test_same_page_fusion_checks_printed_content(tmp_path, different):
-    font = chinese_font()
-    page = render_page(DOCUMENTS[0], font)[0]
-    second = page.copy()
-    if different:
-        other = render_page(DOCUMENTS[1], font)[0]
-        second[240:620] = other[240:620]
-    else:
-        second[260:] = np.rint(second[260:] * 0.82).astype(np.uint8)
+def _fuse_test_photos(tmp_path, page, second):
     inputs = tmp_path / "photos"
     inputs.mkdir()
     first = cv2.copyMakeBorder(page, 72, 72, 72, 72, cv2.BORDER_CONSTANT, value=DESK)
@@ -235,8 +226,22 @@ def test_same_page_fusion_checks_printed_content(tmp_path, different):
     write_png(inputs / "2.png", cv2.warpAffine(second, rotation, (width, height), borderValue=DESK))
 
     output = tmp_path / "book"
-    code = main(["to-pdf", "--input", str(inputs), "--output", str(output), "--same-page", "--dpi", "150"])
-    run = _read_run(output)
+    code = main(["to-pdf", "--input", str(inputs), "--output", str(output), "--same-page", "--dpi", "150",
+                 "--source", "synthetic"])
+    return code, output, _read_run(output)
+
+
+@pytest.mark.parametrize("different", [False, True])
+def test_same_page_fusion_checks_printed_content(tmp_path, different):
+    font = chinese_font()
+    page = render_page(DOCUMENTS[0], font)[0]
+    second = page.copy()
+    if different:
+        other = render_page(DOCUMENTS[1], font)[0]
+        second[240:620] = other[240:620]
+    else:
+        second[260:] = np.rint(second[260:] * 0.82).astype(np.uint8)
+    code, output, run = _fuse_test_photos(tmp_path, page, second)
     if different:
         assert code == 1 and run["error_code"] == "capture_mismatch"
         assert not (output / "book.pdf").exists()
@@ -246,6 +251,32 @@ def test_same_page_fusion_checks_printed_content(tmp_path, different):
         with pymupdf.open(output / "book.pdf") as document:
             assert len(document) == 1
             assert document[0].get_images()[0][2:4] == tuple(run["pages"][0]["size"])
+
+
+@pytest.mark.parametrize("texts,x_fraction,y_fraction,scale", [
+    (("TOTAL 1280", "TOTAL 1230"), 0.23, 0.86, 1.18),
+    (("07", "01"), 0.88, 0.949, 0.64),
+    (("SHIP TO NORTH", "SHIP TO SOUTH"), 0.23, 0.80, 0.82),
+])
+def test_same_page_fusion_marks_local_text_conflicts(tmp_path, texts, x_fraction, y_fraction, scale):
+    page = render_page(DOCUMENTS[0], chinese_font())[0]
+    height, width = page.shape[:2]
+    x, y = round(x_fraction * width), round(y_fraction * height)
+    page[y - 50:y + 8, x - 12:width - 30] = 255
+    captures = [page.copy(), page.copy()]
+    for capture, text in zip(captures, texts, strict=True):
+        cv2.putText(capture, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (22, 22, 22), 2, cv2.LINE_AA)
+    code, output, run = _fuse_test_photos(tmp_path, *captures)
+    assert code == 1 and run["error_code"] == "capture_mismatch"
+    assert run["review_pages"] == [1, 2] and not (output / "book.pdf").exists()
+    assert all((output / page["image"]).is_file() for page in run["pages"])
+    fusion = run["fusion"]
+    assert fusion["status"] == "needs_review"
+    assert fusion["before_flow"] and "after_flow" in fusion
+    w, h = fusion["alignment_size"]
+    conflicts = fusion["after_flow"] + fusion["rigid_conflicts"]
+    assert any(abs(box[1] / h - y_fraction) < 0.05 and box[0] / w >= x_fraction - 0.04
+               for box in (region["box"] for region in conflicts))
 
 
 def test_fusion_preserves_a_continuous_rule_near_the_margin():
@@ -284,3 +315,37 @@ def test_searchable_book_keeps_chinese_reading_order(tmp_path):
         assert not document[0].search_for("城市雨水")
     assert main(["verify-pdf", "--input", str(output / "book.pdf"), "--expected-text", str(output / "book.txt"),
                  "--keyword", "城市雨水"]) == 0
+
+
+@pytest.mark.ocr_integration
+def test_searchable_book_reads_two_columns_under_spanning_title(tmp_path):
+    versions = dependency_versions()
+    if any(not versions[p] for p in ("paddlepaddle", "paddleocr", "paddlex")) or not all(
+        entry["ready"] for entry in model_status(Path(DEFAULTS["ocr"]["model_dir"])).values()
+    ):
+        pytest.skip("Install the pinned PaddleOCR dependencies and weights")
+    photo = np.full((950, 760, 3), DESK, np.uint8)
+    photo[40:911, 45:716] = 255
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    title = "SYNTHETIC PAGE TITLE"
+    title_width = cv2.getTextSize(title, font, 1.25, 2)[0][0]
+    cv2.putText(photo, title, ((760 - title_width) // 2, 160), font, 1.25, (20, 20, 20), 2, cv2.LINE_AA)
+    for label, x, y in (("LEFT FIRST", 76, 290), ("RIGHT FIRST", 410, 290),
+                        ("LEFT SECOND", 76, 410), ("RIGHT SECOND", 410, 410)):
+        cv2.putText(photo, label, (x, y), font, 0.9, (20, 20, 20), 2, cv2.LINE_AA)
+    image, corners = tmp_path / "two_columns.png", tmp_path / "corners.json"
+    write_png(image, photo)
+    corners.write_text(json.dumps({"image_size": [760, 950], "coordinate_space": "exif_normalized_pixels",
+                                   "order": "tl_tr_br_bl", "points": [[45, 40], [715, 40], [715, 910], [45, 910]]}),
+                       encoding="utf-8")
+    output = tmp_path / "book"
+    assert main(["to-pdf", "--input", str(image), "--corners", str(corners), "--source", "synthetic",
+                 "--output", str(output), "--dpi", "150", "--pdf-mode", "searchable",
+                 "--reading-order", "two-column"]) == 0
+    run = _read_run(output)
+    assert run["ocr"]["reading_order"] == "two-column"
+    with pymupdf.open(output / "book.pdf") as document:
+        text = document[0].get_text(sort=False)
+    expected = [title, "LEFT FIRST", "LEFT SECOND", "RIGHT FIRST", "RIGHT SECOND"]
+    positions = [text.index(fragment) for fragment in expected]
+    assert positions == sorted(positions)

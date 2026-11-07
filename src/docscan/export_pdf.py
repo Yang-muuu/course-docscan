@@ -9,6 +9,7 @@ import numpy as np
 import pymupdf as pdf
 
 from .common import DocscanError
+from .geometry import polygon_array, signed_area
 from .image_io import encode_png, load_photo
 
 
@@ -198,8 +199,37 @@ def export_book_pdf(path: Path, sources: list[PdfSource], config: dict) -> dict:
         staging.unlink(missing_ok=True)
 
 
-def verify_pdf(path: Path, expected: str, keyword: str | None = None, ocr: dict | None = None,
+def _validate_ocr_positions(ocr: object) -> None:
+    if not isinstance(ocr, dict):
+        raise DocscanError("invalid_ocr_json", "Expected an OCR result object")
+    size = ocr.get("image_size")
+    if not isinstance(size, list) or len(size) != 2 or any(type(n) is not int or n <= 0 for n in size):
+        raise DocscanError("invalid_ocr_json", "image_size must be two positive pixel dimensions")
+    lines = ocr.get("lines")
+    if not isinstance(lines, list) or not lines:
+        raise DocscanError("invalid_ocr_json", "lines must contain OCR text lines with positions")
+    for index, line in enumerate(lines):
+        if not isinstance(line, dict) or not isinstance(line.get("text"), str) or not line["text"].strip():
+            raise DocscanError("invalid_ocr_json", f"lines[{index}].text must contain text")
+        try:
+            polygon = polygon_array(line.get("polygon"))
+        except DocscanError as error:
+            raise DocscanError("invalid_ocr_json", f"lines[{index}].polygon needs four finite points") from error
+        if np.any(polygon < 0) or np.any(polygon > size) or abs(signed_area(polygon)) < 1e-4:
+            raise DocscanError("invalid_ocr_json", f"lines[{index}].polygon is degenerate or outside image_size")
+
+
+def verify_pdf(path: Path, expected: str, keyword: str | None = None, ocr: dict | Path | None = None,
                background: Path | None = None, render: Path | None = None, *, page_number: int | None = None) -> dict:
+    if isinstance(ocr, Path):
+        ocr_path = ocr
+        try:
+            ocr = json.loads(ocr_path.read_text(encoding="utf-8-sig"))
+            _validate_ocr_positions(ocr)
+        except (OSError, ValueError, DocscanError) as error:
+            raise DocscanError("invalid_ocr_json", f"{ocr_path}: {error}") from error
+    elif ocr is not None:
+        _validate_ocr_positions(ocr)
     with pdf.open(path) as document:
         if page_number is None and len(document) > 1:
             if ocr is not None or background is not None or render is not None:

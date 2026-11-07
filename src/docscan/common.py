@@ -77,12 +77,18 @@ def dependency_versions() -> dict[str, str | None]:
 
 
 def git_state() -> dict:
+    module = Path(__file__).resolve()
+    git = ["git", "-C", str(module.parent)]
     try:
-        commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5)
+        tracked = subprocess.run([*git, "ls-files", "--error-unmatch", "--", module.name],
+                                 capture_output=True, timeout=5)
+        if tracked.returncode:
+            return {"commit": None, "dirty": None, "reason": "Loaded docscan source is not tracked in a Git checkout"}
+        commit = subprocess.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5)
         if commit.returncode == 0:
-            status = subprocess.run(["git", "status", "--porcelain"], capture_output=True, timeout=5)
+            status = subprocess.run([*git, "status", "--porcelain"], capture_output=True, timeout=5)
             return {"commit": commit.stdout.strip(), "dirty": bool(status.stdout) if not status.returncode else None}
-        return {"commit": None, "dirty": None, "reason": "Git HEAD unavailable in working directory"}
+        return {"commit": None, "dirty": None, "reason": "Git HEAD unavailable in the docscan source checkout"}
     except (OSError, subprocess.SubprocessError):
         return {"commit": None, "dirty": None, "reason": "Git command unavailable"}
 

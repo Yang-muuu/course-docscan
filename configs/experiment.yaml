@@ -27,10 +27,11 @@ evaluation:
 freeze:
   source: synthetic
   dev_run_id: 20261106T112820Z-994f1a8f
-  frozen_at_utc: '2026-11-06T11:33:50+00:00'
+  frozen_at_utc: '2026-11-07T12:50:23+00:00'
   config_sha256: d0b9e9f63924406a36880fd0c877fe8339402b68826a6add0cacf8da968be24f
   dev_manifest_sha256: 9af4ae6e46cca1c7626372efaf4048fd031c21a833f1014c2ed385b2d1b7ef60
   dev_input_sha256: 73a7a9599c3315ce102a7e56ce02ba6c0f57a3851adcf00334c608618ba6b0f8
+  dev_results_sha256: f1a589f373cf75399aa81170d9e10acdbbd532a75cdc2e3018cbc77cd1cd87d3
   model_file_sha256:
     detection:
       inference.json: 05feef1acb00aa4cd7362b15f7f501fc4f99d7b1fa73c1c871e0c7b1504b0f5c
@@ -40,9 +41,20 @@ freeze:
       inference.json: 24587345250c7332d0fc6f9a44e794d078cdaeb64c302fef906f325619de2569
       inference.pdiparams: 2460da90875937c94db97eba74ae3d9e5d4c4c57c42f1f41531c09a26bcc771a
       inference.yml: 5dfeb2777f6d0db8177d8128a8acfcf6e6276dc4ac73ea3bf0dc06d6a5e85d8e
+  dev_doc_ids:
+  - syn-01
+  - syn-02
+  dev_image_sha256:
+    syn-01-front_even: 73bd3e7e9c858d0503c17d28340ad9bcb4d4fe77c543280e08b40dd27a64af19
+    syn-01-front_shadow: 312b27c2a7ca371c99378edf6752d63a31d92f2b06361cd592184f0d7d671bd4
+    syn-01-tilt_even: ea2c4b52212c59ab479c32b83834387bea1249d0ee9cdc037501544ce75af17e
+    syn-01-tilt_shadow: 41bde5b3cf57aad0af4bdc9f569a48254123b74d882b38dcfb34f95859f78efb
+    syn-02-front_even: 6bd84b53acf9233daed566182f0bb1da522ef4f9fb517bd79323a71843b2415c
+    syn-02-front_shadow: 331da01e94dc1ef97bf443c96f4ca507832502633d0dee2e3074e0044569049d
+    syn-02-tilt_even: b0b2c0a50aca79d1aa161412501585e0803b09fb535e717020d504f0dc2d4cb5
+    syn-02-tilt_shadow: aadef2f794f53743d17a4b9bd748748780dc925c7719912aa257ebabb00ea9e1
   runtime_versions:
     paddlepaddle: 3.3.0
     paddleocr: 3.3.1
     paddlex: 3.3.13
-  selection_note: 合成开发集按 E 和 F 的合计编辑次数除以合计真值字符数选参。核比例 0.045 为 13/3376，核比例 0.075 为
-    12/3376。选择 0.075。
+  selection_note: 合成开发集核比例 0.045 为 13/3376，0.075 为 12/3376。以原始开发记录重冻。
