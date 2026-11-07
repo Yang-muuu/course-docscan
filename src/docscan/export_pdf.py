@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -168,7 +169,8 @@ def _verify_book(document: pdf.Document, expected: list[str], keyword: str | Non
     return report
 
 
-def export_book_pdf(path: Path, sources: list[PdfSource], config: dict) -> dict:
+def export_book_pdf(path: Path, sources: list[PdfSource], config: dict, *,
+                    on_page: Callable[[int, int], None] | None = None) -> dict:
     if not sources:
         raise DocscanError("empty_book", "There are no pages to export")
     staging = path.with_suffix(".partial.pdf")
@@ -176,6 +178,8 @@ def export_book_pdf(path: Path, sources: list[PdfSource], config: dict) -> dict:
     try:
         with pdf.open() as document:
             for number, source in enumerate(sources, 1):
+                if on_page is not None:
+                    on_page(number, len(sources))
                 result = json.loads(source.ocr.read_text(encoding="utf-8")) if source.ocr is not None else None
                 layered = result if result is not None and result["status"] != "no_text" else None
                 try:

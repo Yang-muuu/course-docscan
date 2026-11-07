@@ -2,6 +2,23 @@
 
 `docscan` 将手机拍摄的纸张和书页矫正、去阴影并导出为白底 PDF。它支持书脊拆页、同页多拍合成和中文可搜索 PDF。OCR 对照实验使用合成数据，实拍讲义用于展示扫描效果。
 
+## Windows 桌面程序
+
+在 Windows x64 上完整解压桌面版，双击 `DocScan.exe`。点击「添加照片」或「打开示例」，选择扫描模式，再点击「开始处理」。核对原图和处理结果后点击「保存 PDF」。勾选「生成可搜索文字」即可加入 OCR 文字层，模型已随包提供。
+
+左侧照片列表决定页序，可上移、下移、旋转和删除。书籍模式会把一张摊开照片拆成两页，同页多拍需要同一页的 2 到 4 张完整照片。可用「调整边界」拖动纸张四角或书脊两端，点击「100% 查看」放大小字。
+
+[下载桌面版 v0.2.0](https://github.com/Yang-muuu/course-docscan/releases/tag/v0.2.0) · [合成演示照片](examples/desktop/README.md)
+
+在项目的 Windows x64 Python 3.13 环境中可从源码启动和构建。
+
+```powershell
+& $py -m docscan prepare-models
+& $py -m docscan.desktop
+& $py scripts/build_desktop.py
+& .\dist\DocScan\runtime\python.exe -X utf8 -B scripts/verify_desktop.py --output outputs/desktop_check
+```
+
 ## 快速生成扫描 PDF
 
 在项目根目录用 PowerShell 运行以下命令。自带样例是合成文档，导出的图像 PDF 位于 `outputs/quick_scan/book.pdf`。

@@ -1,0 +1,56 @@
+name: Windows portable package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: '1'
+
+jobs:
+  package:
+    runs-on: windows-2025
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13.7'
+      - name: Install pinned dependencies
+        run: |
+          python -m pip install -r requirements.win-py313.lock
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip install --no-build-isolation --no-deps -e .
+      - name: Bundle the application and local OCR models
+        run: |
+          python -m docscan prepare-models
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/build_desktop.py
+      - name: Exercise the packaged launcher and desktop workflow
+        run: |
+          & .\dist\DocScan\runtime\python.exe -X utf8 -B scripts/verify_desktop.py --output outputs/desktop-host
+      - name: Verify on Windows Server Core without an installed Python
+        run: |
+          $image = 'mcr.microsoft.com/windows/servercore:ltsc2025'
+          docker pull $image
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $package = (Resolve-Path 'dist/DocScan').Path
+          $check = (New-Item -ItemType Directory 'outputs/desktop-container').FullName
+          Copy-Item -LiteralPath 'scripts/verify_desktop.py' -Destination $check
+          $command = @'
+          $ErrorActionPreference = 'Stop'
+          if ((Get-Command python,py -ErrorAction SilentlyContinue) -or
+              (Test-Path 'HKLM:\Software\Python\PythonCore') -or
+              (Test-Path 'HKCU:\Software\Python\PythonCore')) {
+            throw 'This Windows image already has Python installed'
+          }
+          'No installed Python detected'
+          & C:\DocScan\runtime\python.exe -X utf8 -B C:\QA\verify_desktop.py --output C:\QA\evidence
+          exit $LASTEXITCODE
+          '@
+          docker run --rm --isolation process --network none --mount "type=bind,source=$package,target=C:\DocScan,readonly" --mount "type=bind,source=$check,target=C:\QA" $image powershell.exe -NoProfile -Command $command
+          exit $LASTEXITCODE
