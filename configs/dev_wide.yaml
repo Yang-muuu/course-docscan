@@ -1,0 +1,3 @@
+# One development candidate. Other settings remain the same as the built-in defaults.
+enhance:
+  background_scale: 0.075

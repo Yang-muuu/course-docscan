@@ -1,0 +1,27 @@
+# Overrides are merged over the built-in settings. Paths are relative to the working directory.
+geometry:
+  page_format: a4
+  max_long_edge: 1800
+  detect_max_side: 960
+  min_area_ratio: 0.18
+  max_area_ratio: 0.96
+enhance:
+  background_scale: 0.045
+  background_min: 15
+  background_max: 121
+  background_floor: 16.0
+  target_white: 245.0
+  adaptive_block: 41
+  adaptive_c: 12.0
+ocr:
+  model_dir: .models
+  device: cpu
+  cpu_threads: 4
+  max_input_side: 1600
+  score_thresh: 0.0
+pdf:
+  dpi: 150.0
+  font: null
+evaluation:
+  auto_iou_min: 0.92
+  auto_corner_error_max: 0.03

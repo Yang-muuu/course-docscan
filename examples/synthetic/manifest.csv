@@ -1,0 +1,2 @@
+﻿image_id,doc_id,image_path,gt_text_path,corners_path,split,condition,source,page_orientation,notes
+syn-01-tilt_shadow,syn-01,sample.jpg,syn-01.txt,sample.corners.json,dev,tilt_shadow,synthetic,portrait,Program-generated print and photo simulation; no real photo

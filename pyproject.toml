@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools==80.9.0", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "course-docscan"
+version = "0.1.0"
+description = "Document scanning and paired OCR evaluation for a course project"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "numpy==2.2.6",
+    "opencv-contrib-python==4.10.0.84",
+    "Pillow==12.0.0",
+    "PyYAML==6.0.2",
+    "PyMuPDF==1.26.7",
+]
+
+[project.optional-dependencies]
+ocr = ["paddlepaddle==3.3.0", "paddleocr==3.3.1", "paddlex==3.3.13"]
+report = ["matplotlib==3.10.7", "python-docx==1.2.0"]
+test = ["pytest==8.4.2"]
+
+[project.scripts]
+docscan = "docscan.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["ocr_integration: requires installed PaddleOCR and both local model weights"]
+
