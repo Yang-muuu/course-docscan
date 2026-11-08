@@ -80,8 +80,13 @@ def _verify_text(page: pdf.Page, expected: str, keyword: str | None, ocr: dict |
     if ocr is not None:
         w, h = ocr["image_size"]
         scale = np.array([page.rect.width / w, page.rect.height / h])
-        chars = [(chr(char[0]), pdf.Rect(char[3])) for span in spans for char in span["chars"]
-                 if not chr(char[0]).isspace()]
+        # TextWriter stretches short lines to their OCR width. texttrace reports glyph
+        # boxes with that horizontal stretch applied to their height too, so it cannot be
+        # used here; rawdict reports the boxes actually placed on the page.
+        raw = page.get_text("rawdict", sort=False)
+        chars = [(char["c"], pdf.Rect(char["bbox"])) for block in raw["blocks"]
+                 for line in block.get("lines", ()) for span in line["spans"]
+                 for char in span["chars"] if not char["c"].isspace()]
         pointer = 0
         line_coverages = []
         for line in ocr["lines"]:

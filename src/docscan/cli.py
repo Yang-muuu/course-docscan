@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from time import perf_counter
@@ -47,7 +48,7 @@ def prepare(args: argparse.Namespace) -> int:
     from .models import prepare_models
 
     config, _ = load_config(args.config)
-    result = prepare_models(Path(config["ocr"]["model_dir"]), dewarp=args.dewarp)
+    result = prepare_models(Path(config["ocr"]["model_dir"]), dewarp=args.dewarp, candidates=args.candidates)
     show(result)
     return int(result["status"] != "ok")
 
@@ -140,6 +141,22 @@ def book(args: argparse.Namespace) -> int:
     return int(result["status"] != "ok")
 
 
+def candidates(args: argparse.Namespace) -> int:
+    from .candidates import scan_candidates
+    from .config import load_config
+
+    config, _ = load_config(args.config)
+    bundled = Path(__file__).resolve().parents[2] / "models"
+    if args.config is None and bundled.is_dir():
+        config["ocr"]["model_dir"] = str(bundled)
+        if os.name == "nt":
+            appdata = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "DocScan"
+            os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(appdata / "paddlex"))
+    result = scan_candidates(args.input, args.output, config)
+    show(result)
+    return int(result["status"] != "ok")
+
+
 def verify_pdf(args: argparse.Namespace) -> int:
     from .export_pdf import verify_pdf as verify
 
@@ -189,7 +206,9 @@ def parser() -> argparse.ArgumentParser:
     check.set_defaults(handler=doctor)
     models = commands.add_parser("prepare-models", help="Download and verify the two pinned PP-OCRv5 weights.")
     models.add_argument("--config", type=Path)
-    models.add_argument("--dewarp", action="store_true", help="Prepare the optional UVDoc weights instead.")
+    model_kind = models.add_mutually_exclusive_group()
+    model_kind.add_argument("--dewarp", action="store_true", help="Prepare the optional UVDoc weights instead.")
+    model_kind.add_argument("--candidates", action="store_true", help="Prepare the offline page candidate models.")
     models.set_defaults(handler=prepare)
     ocr = commands.add_parser("ocr-check", help="Run real PaddleOCR inference directly on one image.")
     ocr.add_argument("--input", type=Path, required=True)
@@ -238,6 +257,12 @@ def parser() -> argparse.ArgumentParser:
     pages.add_argument("--pdf-font", type=Path)
     pages.add_argument("--source", choices=("real", "synthetic", "unspecified"), default="unspecified")
     pages.set_defaults(handler=book)
+    choices = commands.add_parser("candidates", help="Generate three different scans per photo as A.png, B.png and C.png.")
+    choices.add_argument("--input", type=Path, required=True,
+                         help="JPG/PNG, a photo folder, or PDF/ZIP groups with reference page first.")
+    choices.add_argument("--output", type=Path, required=True)
+    choices.add_argument("--config", type=Path)
+    choices.set_defaults(handler=candidates)
     for command in (ocr, scanning, pages):
         command.add_argument("--reading-order", choices=("rows", "two-column"), default="rows",
                              help="Read by rows, or read left then right between headings crossing the page center.")

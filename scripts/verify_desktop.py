@@ -19,7 +19,7 @@ import psutil
 import pymupdf
 from PIL import Image, ImageGrab
 
-from docscan.desktop import EXAMPLE, ROOT, DocScanWindow, configuration
+from docscan.desktop import EXAMPLES, ROOT, VARIANTS, DocScanWindow, configuration
 
 
 def verify_launcher(work: Path) -> dict:
@@ -95,7 +95,6 @@ def clear(app: DocScanWindow) -> None:
 
 
 def drag_handle(app: DocScanWindow) -> None:
-    app.edit_button.invoke()
     wait_ui(app)
     canvas = app.original.canvas
     assert app.original.handles
@@ -123,112 +122,96 @@ def save(app: DocScanWindow, destination: Path, *, cancel: bool = False) -> None
         assert app.last_pdf == destination and destination.is_file(), app.issue.get()
 
 
-def verify_paper(app: DocScanWindow, work: Path, screenshot: Path | None) -> dict:
+def verify_shadow_choices(app: DocScanWindow, work: Path, screenshot: Path | None) -> dict:
+    assert not hasattr(app, "mode_box")
+    app.example_button.invoke()
+    assert tuple(item.path for item in app.photos) == EXAMPLES and len(EXAMPLES) == 3
+    assert len(app.original.handles) == 4, "A boundary must be shown immediately after import"
+    wait_ui(app)
+    for index, item in enumerate(app.photos):
+        assert item.boundary is not None and item.corners is None
+        select(app, index)
+        assert tuple(app.original.handles) == item.boundary.points
+    assert app.photos[2].boundary.analysis.geometry.mode == "book_leaf"
+
+    before = tuple(app.original.handles)
+    drag_handle(app)
+    assert app.photos[2].corners and tuple(app.original.handles) != before
+    app.auto_button.invoke()
+    assert app.photos[2].corners is None and tuple(app.original.handles) == before
+    drag_handle(app)
+    assert app.photos[2].corners == tuple(app.original.handles)
+
     folder = work / "中文 输入"
     folder.mkdir()
-    reading, rainfall = folder / "校园阅读.jpg", folder / "城市雨水.png"
-    shutil.copy2(EXAMPLE, reading)
-    with Image.open(ROOT / "examples/desktop/book-spread.jpg") as spread:
-        spread.crop((spread.width - 840, 0, spread.width, spread.height)).save(rainfall)
-    add(app, reading, rainfall, reading)
-    select(app, 2)
-    app.remove_button.invoke()
-    assert len(app.photos) == 2
-    select(app, 0)
-    app.down_button.invoke()
-    assert [item.path for item in app.photos] == [rainfall, reading]
+    extra = folder / "复查边界.jpg"
+    shutil.copy2(EXAMPLES[0], extra)
+    add(app, extra)
+    assert len(app.original.handles) == 4
+    wait_ui(app)
+    assert app.photos[3].boundary is not None
     app.turn_button.invoke()
-    assert app.photos[1].turns == 1
-    for _ in range(3):
-        app.turn_button.invoke()
-    assert app.photos[1].turns == 0
-    process(app, 2)
-    drag_handle(app)
-    assert app.photos[1].corners and app.preview is None, app.issue.get()
-    process(app, 2)
+    wait_ui(app)
+    assert app.photos[3].turns == 1 and len(app.original.handles) == 4
+    assert app.photos[3].boundary is not None
+    app.remove_button.invoke()
+
+    process(app, 3)
+    assert all(len(page.variants) == 3 and len({path.read_bytes() for path in page.variants}) == 3
+               for page in app.preview.pages)
+    assert app.photos[2].corners is not None
+    chosen = []
+    for index, page in enumerate(app.preview.pages):
+        select(app, index)
+        choice = (index + 1) % 3
+        app.variant_box.current(choice)
+        app.variant_box.event_generate("<<ComboboxSelected>>")
+        app.root.update()
+        chosen.append(page.variants[choice])
+    select(app, 0)
+    assert app.variant.get() == VARIANTS[1] and app._shown_result == chosen[0]
     app.zoom_check.invoke()
     wait_ui(app)
     assert app.result.extent[0] > app.result.canvas.winfo_width()
     app.zoom_check.invoke()
-    image = work / "批量扫描.pdf"
-    save(app, image)
-    with pymupdf.open(image) as document:
-        assert len(document) == 2
-        for page, expected in zip(document, app.preview.pages, strict=True):
-            xref = page.get_images()[0][0]
-            pixmap = pymupdf.Pixmap(document, xref)
-            with Image.open(expected.source.image) as raster:
-                assert pixmap.samples == raster.convert("RGB").tobytes()
-            assert abs(pixmap.width * 72 / page.rect.width - 300) < 1
+
+    result = work / "实拍去影选图.pdf"
+    save(app, result)
+    with pymupdf.open(result) as document:
+        assert len(document) == len(chosen)
+        for page, expected in zip(document, chosen, strict=True):
+            raster = pymupdf.Pixmap(document, page.get_images()[0][0])
+            mode = "L" if raster.n == 1 else "RGB"
+            with Image.open(expected) as image:
+                assert raster.samples == image.convert(mode).tobytes()
+            assert abs(raster.width * 72 / page.rect.width - 300) < 1
 
     app.ocr_check.invoke()
-    cancelled = work / "取消时保留原文件.pdf"
-    sentinel = image.read_bytes()
+    cancelled = work / "取消保存.pdf"
+    sentinel = result.read_bytes()
     cancelled.write_bytes(sentinel)
     save(app, cancelled, cancel=True)
     assert app.status.get() == "已取消。" and cancelled.read_bytes() == sentinel
-    assert not list(work.glob(".docscan-*"))
-
-    searchable = work / "可搜索扫描.pdf"
+    searchable = work / "实拍可搜索.pdf"
     save(app, searchable)
     with pymupdf.open(searchable) as document:
-        assert len(document) == 2
-        hits = [len(page.search_for(term)) for page, term in zip(document, ("城市雨水", "校园阅读"), strict=True)]
-        assert all(hits), [page.get_text() for page in document]
+        hits = [len(page.search_for(word)) for page, word in zip(document, ("颜色模型", "Phong", "区域"), strict=True)]
+        assert all(hits), [page.get_text()[:130] for page in document]
     with patch("docscan.desktop.os.startfile") as open_file:
         app.pdf_button.invoke()
         app.folder_button.invoke()
         assert [call.args[0] for call in open_file.call_args_list] == [searchable, work]
-    if screenshot is not None:
-        wait_ui(app)
+    if screenshot:
+        select(app, 2)
         app.root.attributes("-topmost", True)
         app.root.lift()
         app.root.update()
-        hwnd = int(app.root.wm_frame(), 0)
-        ImageGrab.grab(window=hwnd).save(screenshot)
+        ImageGrab.grab(window=int(app.root.wm_frame(), 0)).save(screenshot)
         app.root.attributes("-topmost", False)
-    app.ocr_check.invoke()
-    return {"page_order": [rainfall.name, reading.name], "chinese_search_hits": hits,
-            "adjusted_four_corners": True, "dpi": 300, "cancel_preserved_original": True}
-
-
-def verify_other_modes(app: DocScanWindow, work: Path) -> dict:
-    examples = ROOT / "examples/desktop"
-    clear(app)
-    app.mode_box.current(1)
-    app.mode_box.event_generate("<<ComboboxSelected>>")
-    add(app, examples / "book-spread.jpg")
-    process(app, 2)
-    assert [page.side for page in app.preview.pages] == ["left", "right"]
-    drag_handle(app)
-    assert app.photos[0].gutter and app.preview is None, app.issue.get()
-    process(app, 2)
-    book = work / "书页拆分.pdf"
-    save(app, book)
-    with pymupdf.open(book) as document:
-        assert len(document) == 2
-
-    clear(app)
-    app.mode_box.current(2)
-    app.mode_box.event_generate("<<ComboboxSelected>>")
-    add(app, examples / "same-page-1.jpg", examples / "same-page-2.jpg")
-    process(app, 1)
-    merged = work / "同页合成.pdf"
-    save(app, merged)
-    with pymupdf.open(merged) as document:
-        assert len(document) == 1
-
-    clear(app)
-    with Image.open(examples / "book-spread.jpg") as spread:
-        other = Image.new("RGB", (984, 1332), (154, 116, 63))
-        other.paste(spread.crop((spread.width - 840, 0, spread.width, spread.height)), (72, 72))
-        mismatch = work / "不同内容.png"
-        other.save(mismatch)
-    add(app, examples / "same-page-1.jpg", mismatch)
-    app.process_button.invoke()
-    wait_ui(app)
-    assert app.preview is None and "无法确认是同一页" in app.issue.get(), app.issue.get()
-    return {"split_pages": 2, "adjusted_binding": True, "same_page_pdf": 1, "rejected_different_content": True}
+    return {"single_workflow": True, "automatic_four_corners": True, "dragged_book_corners": True,
+            "restored_automatic_boundary": True, "real_examples": [path.name for path in EXAMPLES],
+            "selected_variants": [path.stem for path in chosen], "pdf_uses_selected_images": True,
+            "dpi": 300, "chinese_search_hits": hits, "cancel_preserved_original": True}
 
 
 def main() -> None:
@@ -252,15 +235,14 @@ def main() -> None:
     root = tk.Tk()
     app = DocScanWindow(root, configuration())
     try:
-        paper = verify_paper(app, work, screenshot)
-        others = verify_other_modes(app, work)
+        choices = verify_shadow_choices(app, work, screenshot)
     finally:
         app.close()
         if app.busy:
             wait_ui(app)
     for name in ("cv2", "paddle", "paddleocr", "paddlex", "pymupdf", "tkinter"):
         assert Path(sys.modules[name].__file__).resolve().is_relative_to(runtime), name
-    evidence = {"launcher": launch, "runtime": sys.executable, "isolated_imports": True, **paper, **others}
+    evidence = {"launcher": launch, "runtime": sys.executable, "isolated_imports": True, **choices}
     (work / "evidence.json").write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(evidence, ensure_ascii=False))
 

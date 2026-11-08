@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 from bisect import bisect_right
 from pathlib import Path
 from statistics import median
@@ -12,7 +11,7 @@ import cv2
 import numpy as np
 
 from .common import SEED, DocscanError, dependency_versions, elapsed_ms, error_record, write_json
-from .models import MODEL_NAMES, configure_paddle_cache, invalid_model_paths, model_status
+from .models import MODEL_NAMES, configure_paddle_cache, invalid_model_paths, model_status, paddle_model_path
 
 
 def _row_groups(positions: list[tuple]) -> list[list[tuple]]:
@@ -72,19 +71,6 @@ def order_lines(lines: list[dict], *, column_split: float | None = None) -> tupl
     return ordered, "\n".join(text_rows)
 
 
-def _paddle_model_path(directory: str) -> str:
-    if os.name == "nt" and not directory.isascii():
-        # Paddle's Windows file reader accepts ASCII paths. The launcher works
-        # from the bundle, so "models/..." also works in a Chinese directory.
-        path = Path(directory)
-        current = Path.cwd().resolve()
-        if path.is_relative_to(current):
-            relative = str(path.relative_to(current))
-            if relative.isascii():
-                return relative
-    return directory
-
-
 class PaddleEngine:
     def __init__(self, settings: dict, *, reading_order: str = "rows"):
         self.settings = settings.copy()
@@ -132,8 +118,8 @@ class PaddleEngine:
             self._pipeline = PaddleOCR(
                 text_detection_model_name=MODEL_NAMES["detection"],
                 text_recognition_model_name=MODEL_NAMES["recognition"],
-                text_detection_model_dir=_paddle_model_path(status["detection"]["directory"]),
-                text_recognition_model_dir=_paddle_model_path(status["recognition"]["directory"]),
+                text_detection_model_dir=paddle_model_path(status["detection"]["directory"]),
+                text_recognition_model_dir=paddle_model_path(status["recognition"]["directory"]),
                 **self.options,
             )
         except Exception as error:

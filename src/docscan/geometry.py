@@ -41,7 +41,7 @@ def signed_area(points: np.ndarray) -> float:
     return float((x @ np.roll(y, -1) - y @ np.roll(x, -1)) / 2)
 
 
-def validate_quad(points: object, size: tuple[int, int]) -> np.ndarray:
+def validate_quad(points: object, size: tuple[int, int], *, require_image_order: bool = True) -> np.ndarray:
     quad = polygon_array(points)
     if np.any(quad < 0) or np.any(quad > np.asarray(size) - 1):
         raise DocscanError("invalid_corners", f"Corner outside image bounds {size}")
@@ -55,7 +55,7 @@ def validate_quad(points: object, size: tuple[int, int]) -> np.ndarray:
         raise DocscanError("invalid_corners", "Corners must form a clockwise convex, non-degenerate quadrilateral")
     rightward = edges[0] - edges[2]
     downward = edges[1] - edges[3]
-    if rightward[0] <= 0 or downward[1] <= 0:
+    if require_image_order and (rightward[0] <= 0 or downward[1] <= 0):
         raise DocscanError("invalid_corners", "Corner order must be top-left, top-right, bottom-right, bottom-left")
     return quad.astype(np.float32)
 

@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MSVC_RUNTIME = ("msvcp140.dll", "vcomp140.dll", "vcruntime140.dll", "vcruntime140_1.dll")
 sys.path.insert(0, str(ROOT / "src"))
 
-from docscan.models import MODEL_FILES, MODEL_NAMES, model_status
+from docscan.models import CANDIDATE_MODELS, MODEL_FILES, MODEL_NAMES, model_status
 
 
 def copy_locked_packages(destination: Path) -> None:
@@ -43,9 +43,10 @@ def build(output: Path, model_directory: Path) -> None:
         raise RuntimeError("Build with the project's Windows x64 Python 3.13 environment.")
     if output.exists():
         raise FileExistsError(output)
-    states = model_status(model_directory)
+    models = {**MODEL_NAMES, **CANDIDATE_MODELS}
+    states = model_status(model_directory, models)
     if any(not state["ready"] for state in states.values()):
-        raise RuntimeError("Prepare and verify the PP-OCR models before building.")
+        raise RuntimeError("Prepare and verify the required local models before building.")
 
     base = Path(sys.base_prefix)
     windows = Path(os.environ["WINDIR"])
@@ -72,10 +73,10 @@ def build(output: Path, model_directory: Path) -> None:
         )
         copy_locked_packages(runtime / "Lib/site-packages")
         shutil.copytree(ROOT / "src/docscan", bundle / "app/docscan", ignore=ignore)
-        for name in ("synthetic", "desktop"):
-            shutil.copytree(ROOT / "examples" / name, bundle / "examples" / name)
+        shutil.copytree(ROOT / "examples/real", bundle / "examples/real")
+        shutil.copy2(ROOT / "examples/real/README.md", bundle / "README.md")
         shutil.copy2(ROOT / "THIRD_PARTY.md", bundle / "THIRD_PARTY.md")
-        for name in MODEL_NAMES.values():
+        for name in models.values():
             destination = bundle / "models" / name
             destination.mkdir(parents=True)
             for filename in MODEL_FILES:

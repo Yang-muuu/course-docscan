@@ -11,14 +11,12 @@ from tempfile import TemporaryDirectory
 import cv2
 import numpy as np
 
-from .capture_fusion import CaptureMismatch, fuse_captures
+from .candidates import CandidateScanner, PageAnalysis
 from .common import DocscanError, write_json
 from .enhance import gray_image
 from .export_pdf import PdfSource, export_book_pdf
 from .geometry import validate_quad
 from .image_io import load_photo, write_png
-from .page_surface import prepare_page
-from .spread import find_gutter, split_spread
 
 DPI = 300
 Progress = Callable[[str, int, int], None]
@@ -36,33 +34,43 @@ class PhotoProblem(DocscanError):
 
 
 @dataclass(frozen=True)
+class PhotoBoundary:
+    analysis: PageAnalysis
+    size: tuple[int, int]
+    sha256: str
+
+    @property
+    def points(self) -> tuple[Point, ...]:
+        normalized = self.analysis.geometry.corners / (np.asarray(self.size) - 1)
+        return tuple((float(x), float(y)) for x, y in np.clip(normalized, 0, 1))
+
+
+@dataclass(frozen=True)
 class PhotoInput:
     path: Path
     turns: int = 0
     corners: tuple[Point, ...] | None = None
-    gutter: tuple[float, float] | None = None
+    boundary: PhotoBoundary | None = None
 
     def turned(self) -> PhotoInput:
         corners = None
         if self.corners is not None:
             rotated = tuple((1 - y, x) for x, y in self.corners)
             corners = rotated[-1:] + rotated[:-1]
-        return replace(self, turns=(self.turns + 1) % 4, corners=corners, gutter=None)
+        return replace(self, turns=(self.turns + 1) % 4, corners=corners, boundary=None)
 
 
 @dataclass(frozen=True)
 class PagePreview:
     source: PdfSource
-    photo_index: int
-    side: str
+    variants: tuple[Path, ...]
     warning: str = ""
 
 
 @dataclass(frozen=True)
 class ScanPreview:
     pages: tuple[PagePreview, ...]
-    hints: tuple[PhotoInput, ...]
-    merged: bool = False
+    photos: tuple[PhotoInput, ...]
 
 
 def _checkpoint(cancel: threading.Event) -> None:
@@ -72,7 +80,7 @@ def _checkpoint(cancel: threading.Event) -> None:
 
 def _may_be_blurred(image: np.ndarray) -> bool:
     # Judge printed detail on the prepared page. Skip blank and very sparse pages.
-    gray = gray_image(image)
+    gray = gray_image(image) if image.ndim == 3 else image
     height, width = gray.shape
     scale = min(1, 1100 / max(height, width))
     small = cv2.resize(gray, (max(1, round(width * scale)), max(1, round(height * scale))),
@@ -84,78 +92,80 @@ def _may_be_blurred(image: np.ndarray) -> bool:
     return float(np.mean(np.square(edges[ink]))) < 160
 
 
-def _warning(image: np.ndarray, info: dict) -> str:
+def _warning(image: np.ndarray, needs_review: bool) -> str:
     messages = []
-    if info["needs_review"]:
-        messages.append("请核对裁剪范围，可用「调整边界」重新框选。")
+    if needs_review:
+        messages.append("未能可靠识别纸边，请拖动原图上的四个圆点。")
     if _may_be_blurred(image):
         messages.append("这一页疑似模糊，建议放大核对小字或重新拍摄。")
     return " ".join(messages)
 
 
-def prepare_photos(items: Sequence[PhotoInput], mode: str, directory: Path, config: dict,
+def _inspect_photo(item: PhotoInput, index: int, scanner: CandidateScanner) -> tuple[PhotoInput, np.ndarray]:
+    try:
+        photo = load_photo(item.path)
+        image = np.ascontiguousarray(np.rot90(photo.bgr, -item.turns))
+        if item.boundary is not None:
+            if item.boundary.sha256 != photo.sha256:
+                raise DocscanError("photo_changed", "照片文件已变化。请移除后重新添加，再核对边界。")
+            return item, image
+        boundary = PhotoBoundary(scanner.analyze(image), image.shape[1::-1], photo.sha256)
+        corners = item.corners
+        if corners is not None:
+            # After rotation, align the edited corner order with the newly detected page axes.
+            points = np.asarray(corners)
+            first = min(range(4), key=lambda i: np.square(np.roll(points, -i, axis=0) - boundary.points).sum())
+            corners = corners[first:] + corners[:first]
+        return replace(item, boundary=boundary, corners=corners), image
+    except (DocscanError, OSError, RuntimeError, ValueError, cv2.error) as error:
+        problem = error if isinstance(error, DocscanError) else DocscanError("scan_failed", str(error))
+        raise PhotoProblem(problem, index) from error
+
+
+def inspect_boundaries(items: Sequence[PhotoInput], config: dict,
+                       progress: Progress, cancel: threading.Event) -> tuple[PhotoInput, ...]:
+    scanner = CandidateScanner(config)
+    inspected = []
+    for index, item in enumerate(items):
+        _checkpoint(cancel)
+        progress("识别纸页边界", index + 1, len(items))
+        detected, _ = _inspect_photo(item, index, scanner)
+        inspected.append(detected)
+    _checkpoint(cancel)
+    return tuple(inspected)
+
+
+def prepare_photos(items: Sequence[PhotoInput], directory: Path, config: dict,
                    progress: Progress, cancel: threading.Event) -> ScanPreview:
     if not items:
         raise DocscanError("empty_book", "请选择要处理的照片。")
-    if mode == "same" and not 2 <= len(items) <= 4:
-        raise DocscanError("invalid_book_options", "同页多拍需要 2 到 4 张同一页的完整照片。")
-    directory.mkdir(parents=True, exist_ok=True)
-    pages, hints, captures = [], [], []
+
+    scanner = CandidateScanner(config)
+    pages, inspected = [], []
     for index, item in enumerate(items):
         _checkpoint(cancel)
-        progress("处理照片", index + 1, len(items))
+        progress("生成三种去影效果", index + 1, len(items))
+        item, image = _inspect_photo(item, index, scanner)
         try:
-            upright = load_photo(item.path).bgr
-            image = np.ascontiguousarray(np.rot90(upright, -item.turns))
-            height, width = image.shape[:2]
-            hint = item
-            manual = None
-            if mode == "spread":
-                gutter = item.gutter or find_gutter(image)[0]
-                if gutter is None:
-                    raise DocscanError("gutter_not_found", "未能确认书脊位置。请调整分割线后重试。")
-                hint = replace(item, gutter=gutter)
-                parts = [(side, pixels) for side, pixels, _ in split_spread(image, gutter, config["geometry"])]
-            else:
-                parts = [("single", image)]
-                if item.corners is not None:
-                    manual = validate_quad(np.asarray(item.corners) * [width - 1, height - 1], (width, height))
-
-            for side, pixels in parts:
-                _checkpoint(cancel)
-                page, mask, info = prepare_page(pixels, config, "native", "auto", manual, dpi=DPI)
-                if side == "single" and "geometry" in info:
-                    normalized = np.asarray(info["geometry"]["points"]) / [width - 1, height - 1]
-                    hint = replace(hint, corners=tuple((float(x), float(y)) for x, y in normalized))
-                if mode == "same":
-                    if "geometry" not in info or any(info["frame_edges_touched"].values()):
-                        raise DocscanError("incomplete_capture", "合成需要每张照片都拍到完整纸页。")
-                    captures.append((page, mask, info))
-                else:
-                    path = directory / f"{len(pages) + 1:04d}.png"
-                    write_png(path, page)
-                    size = info["pdf_page_size_points"]
-                    pages.append(PagePreview(PdfSource(path, None, size), index, side, _warning(page, info)))
-            hints.append(hint)
-        except (DocscanError, OSError, ValueError, cv2.error, np.linalg.LinAlgError) as error:
+            size = item.boundary.size
+            manual = (validate_quad(np.asarray(item.corners) * (np.asarray(size) - 1), size,
+                                    require_image_order=False) if item.corners else None)
+            variants, info = scanner.scan(image, manual=manual, analysis=item.boundary.analysis)
+            _checkpoint(cancel)
+            folder = directory / f"{index + 1:04d}"
+            folder.mkdir(parents=True)
+            paths = tuple(folder / f"{label}.png" for label in "ABC")
+            for label, path in zip("ABC", paths, strict=True):
+                write_png(path, variants[label])
+            page_height, page_width = variants["A"].shape
+            source = PdfSource(paths[0], None, (page_width * 72 / DPI, page_height * 72 / DPI))
+            review = info["mode"] == "full_frame_review" and not info["manual_boundary"]
+            pages.append(PagePreview(source, paths, _warning(variants["A"], review)))
+            inspected.append(item)
+        except (DocscanError, OSError, RuntimeError, ValueError, cv2.error) as error:
             problem = error if isinstance(error, DocscanError) else DocscanError("scan_failed", str(error))
             raise PhotoProblem(problem, index) from error
-
-    if mode == "same":
-        _checkpoint(cancel)
-        progress("对齐并合成", len(items), len(items))
-        try:
-            page, anchor, _ = fuse_captures([capture[0] for capture in captures])
-        except CaptureMismatch as error:
-            raise PhotoProblem(error, int(error.evidence["capture"]) - 1) from error
-        _, mask, info = captures[anchor]
-        page[mask == 0] = 255
-        path = directory / "merged.png"
-        write_png(path, page)
-        pages.append(PagePreview(PdfSource(path, None, info["pdf_page_size_points"]), anchor, "merged",
-                                 _warning(page, info)))
-    _checkpoint(cancel)
-    return ScanPreview(tuple(pages), tuple(hints), mode == "same")
+    return ScanPreview(tuple(pages), tuple(inspected))
 
 
 def save_scans(preview: ScanPreview, destination: Path, searchable: bool, config: dict,

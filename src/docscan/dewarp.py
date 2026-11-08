@@ -6,7 +6,7 @@ from time import perf_counter
 import numpy as np
 
 from .common import DocscanError, elapsed_ms
-from .models import DEWARP_MODELS, configure_paddle_cache, invalid_model_paths, model_status
+from .models import DEWARP_MODELS, configure_paddle_cache, invalid_model_paths, model_status, paddle_model_path
 
 
 class Dewarper:
@@ -35,7 +35,7 @@ class Dewarper:
             configure_paddle_cache(self.root)
             from paddleocr import TextImageUnwarping
 
-            predictor = TextImageUnwarping(model_name=model["name"], model_dir=model["directory"],
+            predictor = TextImageUnwarping(model_name=model["name"], model_dir=paddle_model_path(model["directory"]),
                                            device=self.device, enable_mkldnn=False, cpu_threads=self.threads)
             self._predictor = predictor
             self.metadata.update(status="ok", load_ms=elapsed_ms(start), weights=model["file_sha256"])

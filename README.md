@@ -4,20 +4,38 @@
 
 ## Windows 桌面程序
 
-在 Windows x64 上完整解压桌面版，双击 `DocScan.exe`。点击「添加照片」或「打开示例」，选择扫描模式，再点击「开始处理」。核对原图和处理结果后点击「保存 PDF」。勾选「生成可搜索文字」即可加入 OCR 文字层，模型已随包提供。
+在 Windows x64 上完整解压桌面版，双击 `DocScan.exe`。点击「添加照片」或「打开实拍示例」，原图上会自动显示纸页边界。需要微调时拖动四角，然后点击「开始处理」。在右侧为每张照片选择 A、B 或 C，点击「保存 PDF」。勾选「生成可搜索文字」即可加入 OCR 文字层，模型已随包提供。
 
-左侧照片列表决定页序，可上移、下移、旋转和删除。书籍模式会把一张摊开照片拆成两页，同页多拍需要同一页的 2 到 4 张完整照片。可用「调整边界」拖动纸张四角或书脊两端，点击「100% 查看」放大小字。
+左侧照片列表决定页序，可上移、下移、旋转和删除。「恢复自动」会撤回当前照片的手动裁剪，点击「100% 查看」可放大小字。桌面流程专用于三种去影，每张照片生成一页的三种候选。书页照片按主体页处理。
 
-[下载桌面版 v0.2.0](https://github.com/Yang-muuu/course-docscan/releases/tag/v0.2.0) · [合成演示照片](examples/desktop/README.md)
+[历史桌面版 v0.2.0](https://github.com/Yang-muuu/course-docscan/releases/tag/v0.2.0) · [实拍去影示例与使用方法](examples/real/README.md)
 
 在项目的 Windows x64 Python 3.13 环境中可从源码启动和构建。
 
 ```powershell
 & $py -m docscan prepare-models
+& $py -m docscan prepare-models --candidates
 & $py -m docscan.desktop
 & $py scripts/build_desktop.py
 & .\dist\DocScan\runtime\python.exe -X utf8 -B scripts/verify_desktop.py --output outputs/desktop_check
 ```
+
+## 每张原图生成 A、B、C 候选
+
+在项目的 Windows Python 环境中准备方向识别与书页展平权重，再运行候选扫描。候选版便携程序已包含这些权重，可在解压后的 `DocScan` 文件夹用 `runtime\python.exe` 执行同一条扫描命令。
+
+```powershell
+& .\.venv\Scripts\python.exe -m docscan prepare-models --candidates
+& .\.venv\Scripts\python.exe -m docscan candidates --input .\datadata.zip --output .\outputs\abc
+```
+
+ZIP 中每份 PDF 的第一页用于人工对照，程序从第 2 页开始逐张处理。也可以直接传入单个 PDF、JPG、PNG 或照片目录。PDF 中独立嵌入的原图优先按原像素读取。输出按 `pdf-01/page-02` 等目录分组，每组提供 `A.png`、`B.png`、`C.png`。`run.json` 记录源 PDF、页号、输入哈希、定位和输出。已有输出目录时，本次结果写入新的运行子目录。
+
+| 候选 | 处理效果 |
+| --- | --- |
+| A | 白底和笔画对比均衡。对有书脊的主体页做展平。 |
+| B | 细尺度估计纸面亮度，减少硬阴影边缘的灰带，同时压低浅色噪声。对有书脊的主体页做展平。 |
+| C | 保留更多灰阶和浅细线。书页展平时额外保留图形填色，增强较淡的笔画。 |
 
 ## 快速生成扫描 PDF
 

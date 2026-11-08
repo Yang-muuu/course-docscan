@@ -21,7 +21,6 @@ class ImagePreview(ttk.Frame):
         self.origin = (0, 0)
         self.extent = (1, 1)
         self.handles: list[Point] = []
-        self.gutter = False
         self._change: Callable[[tuple[Point, ...]], bool] | None = None
         self._drag: int | None = None
         self._previous: tuple[Point, ...] = ()
@@ -56,10 +55,9 @@ class ImagePreview(ttk.Frame):
         self.canvas.yview_moveto(0)
         self._schedule_redraw()
 
-    def edit(self, points: tuple[Point, ...] = (), *, gutter: bool = False,
+    def edit(self, points: tuple[Point, ...] = (), *,
              changed: Callable[[tuple[Point, ...]], bool] | None = None) -> None:
         self.handles = list(points)
-        self.gutter = gutter
         self._change = changed
         self._drag = None
         self.canvas.configure(cursor="crosshair" if points else "")
@@ -100,11 +98,7 @@ class ImagePreview(ttk.Frame):
         if not self.handles or self.bitmap is None:
             return
         points = [self._point(point) for point in self.handles]
-        if self.gutter:
-            ends = self._point((self.handles[0][0], 0)), self._point((self.handles[1][0], 1))
-            self.canvas.create_line(*ends[0], *ends[1], fill="#1367d4", width=3, tags="edge")
-        else:
-            self.canvas.create_polygon(points, outline="#1367d4", fill="", width=3, tags="edge")
+        self.canvas.create_polygon(points, outline="#1367d4", fill="", width=3, tags="edge")
         for x, y in points:
             self.canvas.create_oval(x - 7, y - 7, x + 7, y + 7, fill="#ffffff", outline="#1367d4",
                                     width=3, tags="edge")
@@ -125,11 +119,7 @@ class ImagePreview(ttk.Frame):
             return
         x = (self.canvas.canvasx(event.x) - self.origin[0]) / self.extent[0]
         y = (self.canvas.canvasy(event.y) - self.origin[1]) / self.extent[1]
-        if self.gutter:
-            point = (min(0.95, max(0.05, x)), self.handles[self._drag][1])
-        else:
-            point = (min(1, max(0, x)), min(1, max(0, y)))
-        self.handles[self._drag] = point
+        self.handles[self._drag] = (min(1, max(0, x)), min(1, max(0, y)))
         self._draw_handles()
 
     def _release(self, _event) -> None:

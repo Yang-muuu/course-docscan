@@ -19,14 +19,13 @@ from PIL import Image
 from .common import DocscanError
 from .config import load_config
 from .desktop_preview import ImagePreview
-from .desktop_scan import PhotoInput, PhotoProblem, Point, ScanCancelled, ScanPreview, prepare_photos, save_scans
+from .desktop_scan import PhotoInput, PhotoProblem, Point, ScanCancelled, ScanPreview, inspect_boundaries, prepare_photos, save_scans
 from .geometry import validate_quad
 from .image_io import IMAGE_SUFFIXES, load_photo
 
 ROOT = Path(__file__).resolve().parents[2]
-EXAMPLE = ROOT / "examples/synthetic/sample.jpg"
-MODES = {"普通纸张": "single", "摊开书籍": "spread", "同页多拍": "same"}
-SIDES = {"single": "整页", "left": "左页", "right": "右页", "merged": "合成页"}
+EXAMPLES = tuple(sorted((ROOT / "examples/real").glob("*.jpg")))
+VARIANTS = ("A 均衡", "B 强去影", "C 保细节")
 DEFAULT_CORNERS = ((0.06, 0.06), (0.94, 0.06), (0.94, 0.94), (0.06, 0.94))
 LOG = logging.getLogger(__name__)
 ERRORS = {
@@ -35,13 +34,10 @@ ERRORS = {
     "invalid_corners": "四角需要顺时针围成一个完整的纸面。请重新拖动圆点。",
     "empty_paper_mask": "未能找到纸面。请调整边界，或重新拍摄完整纸张。",
     "page_too_small": "照片尺寸太小，请导入相机原图。",
-    "gutter_not_found": "未能确认书脊。请拖动分割线的两端，再点「开始处理」。",
-    "invalid_gutter": "分割线过于靠边，请向书脊方向移动。",
-    "incomplete_capture": "合成需要每张照片都拍到完整纸页。请调整四角或重新拍摄。",
-    "capture_mismatch": "无法确认是同一页。请核对页码和文字，只保留同一页的 2 到 4 张照片。",
     "no_searchable_text": "没有识别到文字。请核对清晰度，或取消勾选可搜索文字后保存。",
     "pdf_font_missing_glyph": "有字符无法写入文字层。取消勾选可搜索文字后可保存图像 PDF。",
     "ocr_model_missing": "未找到 OCR 权重。请重新解压完整程序包。",
+    "candidate_models_missing": "未找到三种去影所需权重。请完整解压候选版程序包。",
     "model_file_changed": "OCR 权重校验失败。请重新解压完整程序包。",
     "ocr_model_load_failed": "OCR 初始化失败。请重新解压程序，也可先保存图像 PDF。",
     "pdf_export_failed": "保存失败。请关闭同名 PDF，或换一个可写的文件夹后重试。",
@@ -83,16 +79,13 @@ class DocScanWindow:
         self.root = root
         self.config = config
         self.photos: list[PhotoInput] = []
-        self.hints: dict[tuple[Path, int], PhotoInput] = {}
         self.preview: ScanPreview | None = None
         self.workspace: TemporaryDirectory | None = None
         self.last_pdf: Path | None = None
         self.cancel_event: threading.Event | None = None
         self._closing = False
-        self._editing = False
         self._messages = queue.SimpleQueue()
-        self.mode = tk.StringVar(value=next(iter(MODES)))
-        self.side = tk.StringVar()
+        self.variant = tk.StringVar()
         self.zoomed = tk.BooleanVar()
         self.searchable = tk.BooleanVar()
         self.status = tk.StringVar(value="添加照片，或打开示例开始。")
@@ -133,13 +126,10 @@ class DocScanWindow:
         toolbar = ttk.Frame(root, padding=(20, 7, 20, 9))
         toolbar.grid(row=1, column=0, sticky="ew")
         self.add_button = ttk.Button(toolbar, text="添加照片", command=self.choose_photos)
-        self.example_button = ttk.Button(toolbar, text="打开示例", command=lambda: self.add_photos((EXAMPLE,)))
+        self.example_button = ttk.Button(toolbar, text="打开实拍示例", command=lambda: self.add_photos(EXAMPLES))
         self.add_button.pack(side="left", padx=(0, 5))
         self.example_button.pack(side="left", padx=(0, 15))
-        ttk.Label(toolbar, text="扫描模式").pack(side="left", padx=(0, 5))
-        self.mode_box = ttk.Combobox(toolbar, textvariable=self.mode, values=list(MODES), state="readonly", width=10)
-        self.mode_box.pack(side="left", padx=(0, 7))
-        self.mode_box.bind("<<ComboboxSelected>>", self._mode_changed)
+        ttk.Label(toolbar, text="三种去影", style="Quiet.TLabel").pack(side="left", padx=(0, 10))
         self.process_button = ttk.Button(toolbar, text="开始处理", command=self.process, style="Primary.TButton")
         self.process_button.pack(side="left")
         self.save_button = ttk.Button(toolbar, text="保存 PDF", command=self.choose_pdf, style="Primary.TButton")
@@ -177,19 +167,17 @@ class DocScanWindow:
             small.columnconfigure(i % 2, weight=1)
 
         original, original_header = self._panel(area, 1, "原图")
-        self.edit_button = ttk.Button(original_header, text="调整边界", command=self.edit)
         self.auto_button = ttk.Button(original_header, text="恢复自动", command=self.restore_auto)
         self.auto_button.pack(side="right", padx=(4, 0))
-        self.edit_button.pack(side="right")
         self.original = ImagePreview(original, "添加照片后在这里预览")
         self.original.pack(fill="both", expand=True)
 
         result, result_header = self._panel(area, 2, "处理结果")
         self.zoom_check = ttk.Checkbutton(result_header, text="100% 查看", variable=self.zoomed, command=self._zoom)
         self.zoom_check.pack(side="right")
-        self.side_box = ttk.Combobox(result_header, textvariable=self.side, state="readonly", width=6)
-        self.side_box.pack(side="right", padx=6)
-        self.side_box.bind("<<ComboboxSelected>>", lambda _event: self._show_result())
+        self.variant_box = ttk.Combobox(result_header, textvariable=self.variant, values=VARIANTS, state="disabled", width=10)
+        self.variant_box.pack(side="right", padx=6)
+        self.variant_box.bind("<<ComboboxSelected>>", lambda _event: self._show_result())
         self.result = ImagePreview(result, "点击「开始处理」生成页图预览")
         self.result.pack(fill="both", expand=True)
 
@@ -223,17 +211,16 @@ class DocScanWindow:
         index = self._selected()
         enabled = not self.busy
         for widget, available in (
-            (self.add_button, True), (self.example_button, EXAMPLE.is_file()),
+            (self.add_button, True), (self.example_button, bool(EXAMPLES)),
             (self.process_button, bool(self.photos)), (self.save_button, self.preview is not None),
             (self.ocr_check, True), (self.turn_button, index is not None),
             (self.remove_button, index is not None), (self.up_button, index is not None and index > 0),
             (self.down_button, index is not None and index + 1 < len(self.photos)),
-            (self.edit_button, self.original.image is not None),
-            (self.auto_button, index is not None and bool(self.photos[index].corners or self.photos[index].gutter)),
+            (self.auto_button, index is not None and self.photos[index].corners is not None),
             (self.pdf_button, self.last_pdf is not None), (self.folder_button, self.last_pdf is not None),
         ):
             widget.configure(state="normal" if enabled and available else "disabled")
-        self.mode_box.configure(state="readonly" if enabled else "disabled")
+        self.variant_box.configure(state="readonly" if enabled and self._result_page() else "disabled")
         self.listing.configure(state="normal" if enabled else "disabled")
         self.cancel_button.configure(state="normal" if self.cancel_event and not self.cancel_event.is_set() else "disabled")
 
@@ -251,7 +238,23 @@ class DocScanWindow:
             self.photos.extend(entries)
             self._clear_preview()
             self._list_photos(first)
-            self.status.set(f"已添加 {len(self.photos)} 张照片，点击「开始处理」。")
+            self._detect_boundaries(first, len(entries))
+
+    def _detect_boundaries(self, first: int, count: int) -> None:
+        items = tuple(self.photos[first:first + count])
+
+        def inspect(progress, cancel):
+            try:
+                return inspect_boundaries(items, self.config, progress, cancel)
+            except PhotoProblem as error:
+                raise PhotoProblem(error, first + error.photo_index) from error
+
+        def done(photos):
+            self.photos[first:first + count] = photos
+            self._selection_changed()
+            self.status.set("边界已显示，拖动四角可微调，点击「开始处理」生成 A、B、C。")
+
+        self._start(inspect, done)
 
     def _list_photos(self, index: int | None) -> None:
         self.listing.delete(0, "end")
@@ -268,7 +271,6 @@ class DocScanWindow:
         item = self.photos[index] if index is not None else None
         key = (item.path, item.turns) if item else None
         self.issue.set("")
-        self._editing = False
         self.original.edit()
         if key != self._shown_photo:
             self._shown_photo = key
@@ -280,22 +282,25 @@ class DocScanWindow:
                 except DocscanError as error:
                     self.issue.set(ERRORS.get(error.code, str(error)))
             self.original.show(image)
-        pages = self._result_pages()
-        sides = [SIDES[page.side] for page in pages]
-        self.side_box.configure(values=sides, state="readonly" if len(sides) > 1 else "disabled")
-        self.side.set(sides[0] if sides else "")
+        if item and self.original.image is not None:
+            self._show_boundary(index, item)
+        page = self._result_page()
+        self.variant.set(VARIANTS[page.variants.index(page.source.image)] if page else "")
         self._show_result()
         self._controls()
 
-    def _result_pages(self):
+    def _result_page(self):
         index = self._selected()
         if self.preview is None or index is None:
-            return ()
-        return tuple(page for page in self.preview.pages if self.preview.merged or page.photo_index == index)
+            return None
+        return self.preview.pages[index]
 
     def _show_result(self) -> None:
-        page = next((page for page in self._result_pages() if SIDES[page.side] == self.side.get()), None)
-        path = page.source.image if page else None
+        page = self._result_page()
+        path = page.variants[VARIANTS.index(self.variant.get())] if page else None
+        if page and path != page.source.image:
+            chosen = replace(page, source=replace(page.source, image=path))
+            self.preview = replace(self.preview, pages=tuple(chosen if p is page else p for p in self.preview.pages))
         if path != self._shown_result:
             self._shown_result = path
             if path is None:
@@ -303,25 +308,19 @@ class DocScanWindow:
             else:
                 with Image.open(path) as image:
                     self.result.show(image.convert("RGB"))
-        if page:
+        if page and page.warning:
             self.issue.set(page.warning)
 
     def _clear_preview(self) -> None:
         self.preview = None
         self._shown_result = None
-        self.side.set("")
-        self.side_box.configure(values=(), state="disabled")
+        self.variant.set("")
+        self.variant_box.configure(state="disabled")
         self.result.show(None)
         self.percent.set(0)
         if self.workspace is not None:
             self.workspace.cleanup()
             self.workspace = None
-
-    def _mode_changed(self, _event=None) -> None:
-        self.hints.clear()
-        self._clear_preview()
-        self._selection_changed()
-        self.status.set(f"已选择「{self.mode.get()}」，点击「开始处理」。")
 
     def move(self, direction: int) -> None:
         index = self._selected()
@@ -338,7 +337,7 @@ class DocScanWindow:
             self.photos[index] = self.photos[index].turned()
             self._clear_preview()
             self._selection_changed()
-            self.status.set("已旋转，点击「开始处理」更新预览。")
+            self._detect_boundaries(index, 1)
 
     def remove(self) -> None:
         index = self._selected()
@@ -352,33 +351,19 @@ class DocScanWindow:
         self.original.zoom(self.zoomed.get())
         self.result.zoom(self.zoomed.get())
 
-    def edit(self) -> None:
-        index = self._selected()
-        if index is None or self.original.image is None or self.busy:
-            return
-        item = self.photos[index]
-        hint = self.hints.get((item.path, item.turns), item)
-        spread = MODES[self.mode.get()] == "spread"
-        if spread:
-            top, bottom = item.gutter or hint.gutter or (0.5, 0.5)
-            points = ((top, 0.035), (bottom, 0.965))
-            self.issue.set("拖动分割线的两个圆点对准书脊。")
-        else:
-            points = item.corners or hint.corners or DEFAULT_CORNERS
-            self.issue.set("按左上、右上、右下、左下拖动圆点，框住纸面。")
-        self._editing = True
-        self.original.edit(points, gutter=spread, changed=lambda handles: self._adjust(index, handles, spread))
+    def _show_boundary(self, index: int, item: PhotoInput) -> None:
+        points = item.corners or (item.boundary.points if item.boundary else DEFAULT_CORNERS)
+        self.original.edit(points, changed=lambda handles: self._adjust(index, handles))
+        if item.boundary and item.boundary.analysis.geometry.mode == "full_frame_review" and not item.corners:
+            self.issue.set("未能可靠识别纸边，请拖动原图上的四个圆点。")
 
-    def _adjust(self, index: int, points: tuple[Point, ...], spread: bool) -> bool:
-        if self.busy or not self._editing or index != self._selected():
+    def _adjust(self, index: int, points: tuple[Point, ...]) -> bool:
+        if self.busy or index != self._selected():
             return False
         item = self.photos[index]
         try:
-            if spread:
-                item = replace(item, gutter=(points[0][0], points[1][0]))
-            else:
-                validate_quad(np.asarray(points) * 999, (1000, 1000))
-                item = replace(item, corners=points)
+            validate_quad(np.asarray(points) * 999, (1000, 1000), require_image_order=False)
+            item = replace(item, corners=points)
         except DocscanError as error:
             self.issue.set(ERRORS[error.code])
             return False
@@ -391,7 +376,7 @@ class DocScanWindow:
     def restore_auto(self) -> None:
         index = self._selected()
         if index is not None and not self.busy:
-            self.photos[index] = replace(self.photos[index], corners=None, gutter=None)
+            self.photos[index] = replace(self.photos[index], corners=None)
             self._clear_preview()
             self._selection_changed()
             self.status.set("已恢复自动识别，点击「开始处理」。")
@@ -399,21 +384,20 @@ class DocScanWindow:
     def process(self) -> None:
         if not self.photos or self.busy:
             return
-        mode, photos = MODES[self.mode.get()], tuple(self.photos)
+        photos = tuple(self.photos)
         temporary = TemporaryDirectory(prefix="docscan-pages-")
         self._clear_preview()
-        self.original.edit()
 
         def done(result: ScanPreview) -> None:
             self._clear_preview()
             self.preview, self.workspace = result, temporary
-            self.hints = {(item.path, item.turns): item for item in result.hints}
+            self.photos[:] = result.photos
             self._selection_changed()
             self.percent.set(100)
-            self.status.set(f"处理完成 · {len(result.pages)} 页，可以保存 PDF。")
+            self.status.set("处理完成 · 每张照片可选择 A、B、C，再保存 PDF。")
 
         self._start(lambda progress, cancel: prepare_photos(
-            photos, mode, Path(temporary.name), self.config, progress, cancel,
+            photos, Path(temporary.name), self.config, progress, cancel,
         ), done, temporary.cleanup)
 
     def choose_pdf(self) -> None:
@@ -498,8 +482,6 @@ class DocScanWindow:
             self.listing.see(index)
             self._selection_changed()
         if isinstance(error, DocscanError):
-            if error.code == "gutter_not_found":
-                self.edit()
             prefix = f"第 {error.photo_index + 1} 张 · " if isinstance(error, PhotoProblem) else ""
             self.issue.set(prefix + ERRORS.get(error.code, str(error)))
         elif isinstance(error, OSError):

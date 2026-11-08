@@ -117,6 +117,18 @@ def test_model_cache_rechecks_file_hashes(tmp_path, monkeypatch, capsys):
     assert damaged.name in result["models"][MODEL_NAMES["detection"]]["error"]
 
 
+def test_pdf_geometry_handles_a_stretched_short_line(tmp_path):
+    # A short OCR line may span a wide polygon (for example two parentheses around a formula).
+    # Its hidden text is stretched horizontally; the glyph boxes must still sit in the polygon.
+    image = np.full((120, 250), 230, dtype=np.uint8)
+    annotation = {"status": "ok", "image_size": [250, 120], "full_text": "()",
+                  "lines": [{"text": "()", "polygon": [[40, 30], [210, 27], [211, 64], [41, 67]]}]}
+    target = tmp_path / "stretched.pdf"
+    assert export_pdf(target, image, annotation, DEFAULTS["pdf"])["searchable"]
+    report = verify_pdf(target, annotation["full_text"], "(", annotation)
+    assert report["position_checked"] and report["min_line_center_coverage"] == 1.0
+
+
 def test_pdf_geometry_with_explicit_test_text(tmp_path):
     # Hand-specified polygons test the PDF adapter without claiming OCR inference.
     image = np.full((120, 250), 230, dtype=np.uint8)

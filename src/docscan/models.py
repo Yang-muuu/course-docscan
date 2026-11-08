@@ -12,8 +12,10 @@ from .common import DocscanError, elapsed_ms, error_record, file_sha256, utc_now
 
 MODEL_NAMES = {"detection": "PP-OCRv5_mobile_det", "recognition": "PP-OCRv5_mobile_rec"}
 DEWARP_MODELS = {"dewarp": "UVDoc"}
+CANDIDATE_MODELS = {"detection": MODEL_NAMES["detection"], "orientation": "PP-LCNet_x1_0_doc_ori", **DEWARP_MODELS}
 MODEL_BASE = "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0"
 MODEL_FILES = {"inference.yml", "inference.json", "inference.pdiparams"}
+ORIENTATION_SOURCE = "https://huggingface.co/PaddlePaddle/PP-LCNet_x1_0_doc_ori/resolve/d3b95a6"
 ARCHIVE_HASHES = {
     "PP-OCRv5_mobile_det": "50446e5d01ac2a73d5319c89513281f6578414c888c602f9af13f93feefffc58",
     "PP-OCRv5_mobile_rec": "566b9512b34e34a9f0db54d87b51fa5a0b9ed2cf1ab7e49728cc0b8b5a64f414",
@@ -35,12 +37,28 @@ MODEL_FILE_HASHES = {
         "inference.pdiparams": "810488899520e0da843b9bd9769ba4949f1c81e357f0eceb12d4a7da459c3eca",
         "inference.yml": "be83d537b358f3ff87740e77e14a83ee9e9a7bb215c33d091b69e8bd5904fe39",
     },
+    "PP-LCNet_x1_0_doc_ori": {
+        "inference.json": "3580978602f309c3554508dd85d4fe09b73a7e0d80d7f9e63258f5b72c390c69",
+        "inference.pdiparams": "e8d6e7c5d264507e40e58a655779059d616b20d7441ea22047d829eb3931989c",
+        "inference.yml": "9e195eb729a8173588cd0e8a852c8b373aa606e79e77b4ac7d8346f5426caf26",
+    },
 }
 
 
 def configure_paddle_cache(root: Path) -> None:
     os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
     os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(root / ".paddlex"))
+
+
+def paddle_model_path(directory: str) -> str:
+    if os.name == "nt" and not directory.isascii():
+        # Paddle's Windows file reader can use an ASCII path relative to the app directory.
+        path, current = Path(directory), Path.cwd().resolve()
+        if path.is_relative_to(current):
+            relative = str(path.relative_to(current))
+            if relative.isascii():
+                return relative
+    return directory
 
 
 def _inspect_model(folder: Path, name: str) -> dict:
@@ -86,14 +104,33 @@ def _extract_model(tar_path: Path, target: Path) -> None:
         raise DocscanError("invalid_model_archive", f"Model files missing from {tar_path.name}")
 
 
-def prepare_models(root: Path, *, dewarp: bool = False) -> dict:
+def _download_model(name: str, stage: Path, entry: dict) -> None:
+    start = perf_counter()
+    if name == CANDIDATE_MODELS["orientation"]:
+        target = stage / "model"
+        target.mkdir()
+        for filename in sorted(MODEL_FILES):
+            with urlopen(f"{ORIENTATION_SOURCE}/{filename}", timeout=60) as source, (target / filename).open("wb") as output:
+                shutil.copyfileobj(source, output)
+        entry["download_ms"] = elapsed_ms(start)
+    else:
+        archive = stage / "model.tar"
+        with urlopen(entry["url"], timeout=60) as source, archive.open("wb") as output:
+            shutil.copyfileobj(source, output)
+        entry.update(download_ms=elapsed_ms(start), archive_sha256=file_sha256(archive))
+        if entry["archive_sha256"] != ARCHIVE_HASHES[name]:
+            raise DocscanError("model_archive_changed", f"Unexpected SHA-256 for {name}")
+        _extract_model(archive, stage / "model")
+
+
+def prepare_models(root: Path, *, dewarp: bool = False, candidates: bool = False) -> dict:
     root.mkdir(parents=True, exist_ok=True)
     start = perf_counter()
     entries = {}
-    models = DEWARP_MODELS if dewarp else MODEL_NAMES
+    models = CANDIDATE_MODELS if candidates else DEWARP_MODELS if dewarp else MODEL_NAMES
     for name in models.values():
         target = root / name
-        url = f"{MODEL_BASE}/{name}_infer.tar"
+        url = ORIENTATION_SOURCE if name == CANDIDATE_MODELS["orientation"] else f"{MODEL_BASE}/{name}_infer.tar"
         entry = {"url": url}
         entries[name] = entry
         try:
@@ -108,14 +145,7 @@ def prepare_models(root: Path, *, dewarp: bool = False) -> dict:
                 raise DocscanError("incomplete_model_dir", f"Move the incomplete model directory aside: {target}")
             with TemporaryDirectory(dir=root) as staging:
                 stage = Path(staging)
-                tar_path = stage / "model.tar"
-                tick = perf_counter()
-                with urlopen(url, timeout=60) as response, tar_path.open("wb") as file:
-                    shutil.copyfileobj(response, file)
-                entry.update(download_ms=elapsed_ms(tick), archive_sha256=file_sha256(tar_path))
-                if entry["archive_sha256"] != ARCHIVE_HASHES[name]:
-                    raise DocscanError("model_archive_changed", f"Unexpected SHA-256 for {name}")
-                _extract_model(tar_path, stage / "model")
+                _download_model(name, stage, entry)
                 if not _inspect_model(stage / "model", name)["ready"]:
                     raise DocscanError("model_file_changed", f"Extracted model files failed checksum verification: {name}")
                 (stage / "model").rename(target)
@@ -126,7 +156,8 @@ def prepare_models(root: Path, *, dewarp: bool = False) -> dict:
     result = {"status": status, "models": entries, "finished_at_utc": utc_now(), "elapsed_ms": elapsed_ms(start)}
     if status == "ok":
         result["model_file_sha256"] = model_hashes(root, models)
-    record = root / ("dewarp_preparation.json" if dewarp else "model_preparation.json")
+    record_name = "candidate_preparation.json" if candidates else "dewarp_preparation.json" if dewarp else "model_preparation.json"
+    record = root / record_name
     if not record.exists() or any(value["status"] != "already_available" for value in entries.values()):
         write_json(record, result)
     return result
