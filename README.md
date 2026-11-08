@@ -1,187 +1,119 @@
-# 手机文档扫描与 OCR 课程项目
+# DocScan · 手机照片转白底 PDF
 
-`docscan` 将手机拍摄的纸张和书页矫正、去阴影并导出为白底 PDF。它支持书脊拆页、同页多拍合成和中文可搜索 PDF。OCR 对照实验使用合成数据，实拍讲义用于展示扫描效果。
+把手机拍的纸张、书页自动摆正、去阴影，导出 300 DPI 白底 PDF；可选中文可搜索文字层。Windows 桌面版内置 OCR 模型，解压即用，离线运行。
 
-## Windows 桌面程序
+![DocScan 桌面界面：左侧照片列表，中间原图四角边界，右侧 A/B/C 预览](docs/images/desktop.png)
 
-在 Windows x64 上完整解压桌面版，双击 `DocScan.exe`。点击「添加照片」或「打开实拍示例」，原图上会自动显示纸页边界。需要微调时拖动四角，然后点击「开始处理」。在右侧为每张照片选择 A、B 或 C，点击「保存 PDF」。勾选「生成可搜索文字」即可加入 OCR 文字层，模型已随包提供。
+## 下载即用（Windows x64）
 
-左侧照片列表决定页序，可上移、下移、旋转和删除。「恢复自动」会撤回当前照片的手动裁剪，点击「100% 查看」可放大小字。桌面流程专用于三种去影，每张照片生成一页的三种候选。书页照片按主体页处理。
+1. 打开 [Releases · v0.2.1](https://github.com/Yang-muuu/course-docscan/releases/tag/v0.2.1)，下载 `DocScan-Windows-x64-v0.2.1.zip`（约 325 MB）。
+2. 解压到任意文件夹。请先完整解压，再双击里面的 `DocScan.exe`。
+3. 首次启动稍慢，之后即可正常使用。
 
-[下载桌面版 v0.2.1](https://github.com/Yang-muuu/course-docscan/releases/tag/v0.2.1) · [实拍去影示例与使用方法](examples/real/README.md)
+- 支持 Windows 10/11 x64，不需要安装 Python，也不需要联网。
+- 若出现「Windows 已保护你的电脑」，点「更多信息」→「仍要运行」。
+- 想直接看效果，点「打开实拍示例」，内置 3 张实拍讲义照片。
 
-在项目的 Windows x64 Python 3.13 环境中可从源码启动和构建。
+## 三步完成扫描
 
-```powershell
-& $py -m docscan prepare-models
-& $py -m docscan prepare-models --candidates
-& $py -m docscan.desktop
-& $py scripts/build_desktop.py
-& .\dist\DocScan\runtime\python.exe -X utf8 -B scripts/verify_desktop.py --output outputs/desktop_check
-```
+### 1. 添加照片
 
-## 每张原图生成 A、B、C 候选
+点「添加照片」，选择一张或多张 JPG/JPEG/PNG。左侧列表的顺序就是 PDF 的页序，可用「上移」「下移」「旋转」「删除」调整。
 
-在项目的 Windows Python 环境中准备方向识别与书页展平权重，再运行候选扫描。候选版便携程序已包含这些权重，可在解压后的 `DocScan` 文件夹用 `runtime\python.exe` 执行同一条扫描命令。
+### 2. 确认边界
 
-```powershell
-& .\.venv\Scripts\python.exe -m docscan prepare-models --candidates
-& .\.venv\Scripts\python.exe -m docscan candidates --input .\datadata.zip --output .\outputs\abc
-```
+导入后程序自动识别纸页，并在原图上显示四个圆点。需要微调时拖动圆点；拖错了点「恢复自动」即可撤回。书页照片按主体页处理。
 
-ZIP 中每份 PDF 的第一页用于人工对照，程序从第 2 页开始逐张处理。也可以直接传入单个 PDF、JPG、PNG 或照片目录。PDF 中独立嵌入的原图优先按原像素读取。输出按 `pdf-01/page-02` 等目录分组，每组提供 `A.png`、`B.png`、`C.png`。`run.json` 记录源 PDF、页号、输入哈希、定位和输出。已有输出目录时，本次结果写入新的运行子目录。
+### 3. 选效果并保存
 
-| 候选 | 处理效果 |
-| --- | --- |
-| A | 白底和笔画对比均衡。对有书脊的主体页做展平。 |
-| B | 细尺度估计纸面亮度，减少硬阴影边缘的灰带，同时压低浅色噪声。对有书脊的主体页做展平。 |
-| C | 保留更多灰阶和浅细线。书页展平时额外保留图形填色，增强较淡的笔画。 |
+点「开始处理」，每张照片会生成 A、B、C 三种去影结果。在右侧「处理结果」逐张选择，点「保存 PDF」。
 
-## 快速生成扫描 PDF
+勾选「生成可搜索文字」会额外写入不可见中文文字层，之后可在 PDF 里按 Ctrl+F 搜索；这会多花一点处理时间。不勾选则只保存图像。
 
-在项目根目录用 PowerShell 运行以下命令。自带样例是合成文档，导出的图像 PDF 位于 `outputs/quick_scan/book.pdf`。
+保存的 PDF 为 300 DPI，一页对应一张照片，使用你为每张照片选定的版本。
+
+## A/B/C 怎么选
+
+| 候选 | 适合场景 | 处理倾向 |
+| --- | --- | --- |
+| **A 均衡** | 大多数照片，先看这一版 | 正文与白底平衡，整体自然 |
+| **B 强去影** | 重阴影、灰底、阴影边缘发灰 | 更积极地压掉阴影和浅底纹 |
+| **C 保细节** | 浅色细线、公式、彩色插图 | 保留更多灰阶，避免过度漂白 |
+
+不确定时重点比较字迹是否发虚、阴影边缘是否残留灰带、浅色线条是否还在。
+
+## 从源码运行
+
+需要 Windows x64 与 Python 3.13（3.11–3.13 可用，锁文件对应 3.13）。在项目根目录打开 PowerShell：
 
 ```powershell
 $env:PYTHONUTF8 = '1'
 python -m venv .venv
 $py = '.\.venv\Scripts\python.exe'
-& $py -m pip install -e .
-& $py -m docscan to-pdf --input examples/synthetic/sample.jpg --source synthetic --page-format a4 --output outputs/quick_scan
-```
-
-## OCR 与实验环境
-
-实测组合为 Windows 11 x64、CPython 3.13.7、PaddlePaddle 3.3.0、PaddleOCR 3.3.1、PaddleX 3.3.13。锁文件对应 Windows x64 Python 3.13。使用前面建好的虚拟环境安装完整依赖。
-
-```powershell
 & $py -m pip install -r requirements.win-py313.lock
 & $py -m pip install --no-build-isolation --no-deps -e .
-& $py -m pip check
-& $py -m docscan --help
-& $py -m docscan doctor
-```
-
-其他平台可在隔离环境尝试 `python -m pip install -e ".[ocr,report,test]"` 并运行 `doctor` 与 `ocr-check` 核对实际支持。依赖与模型来源见 [THIRD_PARTY.md](THIRD_PARTY.md)。
-
-## 从可分发样例开始
-
-以下样例来自程序渲染。`--corners` 接受已知四角 JSON，省略时走自动定位。`--pdf-mode image` 生成普通图像 PDF。
-
-```powershell
-& $py -m docscan validate-data --manifest examples/synthetic/manifest.csv
-& $py -m docscan scan --input examples/synthetic/sample.jpg --corners examples/synthetic/sample.corners.json --method E --ocr none --pdf-mode image --output outputs/quick_image
-```
-
-首次使用 OCR 时下载两份官方 PP-OCRv5 权重并校验归档哈希。离线运行时，`doctor` 与模型加载都核对缓存文件的 SHA-256。可通过 YAML 的 `ocr.model_dir` 指向另一处已准备的权重目录。CPU 推理关闭了文档方向、文档展平、文字行方向和 MKL-DNN。模型识别错误、空图、缺权重和缓存损坏分别保留状态。
-
-```powershell
 & $py -m docscan prepare-models
-& $py -m docscan scan --input examples/synthetic/sample.jpg --corners examples/synthetic/sample.corners.json --method E --ocr paddle --pdf-mode searchable --output outputs/quick_ocr
-& $py -m docscan verify-pdf --input outputs/quick_ocr/scan.pdf --expected-text outputs/quick_ocr/text.txt --ocr-json outputs/quick_ocr/ocr.json --background outputs/quick_ocr/enhanced_gray.png --keyword '校园阅读'
+& $py -m docscan prepare-models --candidates
+& $py -m docscan.desktop
 ```
 
-`--output` 不存在时直接使用该目录。目录已存在时会创建新的 `run_id` 子目录，后续命令用 CLI 打印的 `run_dir`。`run.json` 记录源图哈希、实际配置、设备、模型、时间与输出。`ocr_raw.json` 保留 PaddleOCR 的坐标和字段，`ocr.json` 使用调用图像的像素坐标，`text.txt` 按单栏阅读顺序输出。
+`prepare-models` 首次运行会下载并校验 OCR 权重，之后可离线使用。只做图像矫正、不需要 OCR 时，安装 `& $py -m pip install -e .` 即可。
 
-## 纸张与书页转白底 PDF
-
-用 `to-pdf` 将单张照片或目录合成 `book.pdf`。单页、书籍封面和 A4 纸用 `--layout single`（默认）。一本摊开的书用 `--layout spread`，每张照片分为左页和右页。目录按文件名数字排序，例如 `2.jpg` 在 `10.jpg` 前。程序按纸面的局部亮度去阴影，再轻量锐化笔画并保留字内空隙的灰阶。识别出的彩色和灰度插图区域保留原有色调。
-
-斜拍时，程序可从完整矩形纸页的两条正交方向估计宽高比。完整页会清理贴着边缘的折痕与细长残影，并保护识别到的印刷边线。裁切页优先保留拍到的边缘内容。宽高比估计参考 [Zhang 与 He 的拍照校正方法](https://www.microsoft.com/en-us/research/publication/whiteboard-scanning-image-enhancement/)。
-
-默认按 300 DPI 生成并嵌入页图，A4 纵向为 2480 × 3508 像素。`--dpi` 可设为 72 至 400，`--dpi 150` 适合更小的文件。DPI 调整的是页图像素，PDF 的物理尺寸由原页规格决定。`run.json` 在每页记录嵌入图尺寸与实测有效 DPI。
+构建便携包（含运行时、模型和示例）：
 
 ```powershell
-& $py -m docscan to-pdf --input '照片.jpg' --page-format a4 --output outputs/paper_pdf
+& $py scripts\build_desktop.py --output dist\DocScan
+```
+
+产物在 `dist\DocScan`，双击其中的 `DocScan.exe` 运行。模型目录默认是 `.models`，可用 `--models` 指定。
+
+## 命令行（可选）
+
+桌面版适合逐张选图；批量处理、可搜索 PDF 和复现实验用命令行。完整参数见 [命令行用法](docs/cli.md)。
+
+```powershell
+# 单张照片或目录 -> 白底 PDF
+& $py -m docscan to-pdf --input examples/synthetic/sample.jpg --page-format a4 --output outputs/quick_scan
+
+# 摊开的书 -> 左右分页
 & $py -m docscan to-pdf --input '书页照片目录' --layout spread --output outputs/book_pdf
+
+# 一张原图生成 A/B/C 三个候选
+& $py -m docscan candidates --input examples/real/01-light-shadow.jpg --output outputs/abc
+
+# 带中文可搜索文字层
+& $py -m docscan to-pdf --input '书页照片目录' --pdf-mode searchable --output outputs/book_search
 ```
 
-同一张完整纸页拍了 2 至 4 次时，可以把这些照片放在一个目录，用 `--same-page` 配准并合成一页。程序检查匹配点覆盖、全页墨迹及局部字形。`run.json` 保留光流微调前后的差异区域和局部平移比对结果。疑似内容冲突时返回 `capture_mismatch`，分开保存已处理的页图，供 `review_pages` 复查。该模式使用 `--layout single` 和 `--dewarp none`。
+## 测试
 
 ```powershell
-& $py -m docscan to-pdf --input '同一页照片目录' --same-page --output outputs/merged_page
+& $py -m pip install -e ".[test]"
+& $py -m pytest -m "not ocr_integration"
 ```
 
-当角点被遮住或缺失时，程序根据可见长边推算四角，再分割实际可见的纸面。没有足够边线时，使用能分出的可见区域。纸外和缺角区域填白，A4 选项补足页面比例并采用 210 × 297 mm 的实际 PDF 页面尺寸。原图只剩窄条时，可加 `--page-orientation portrait` 或 `landscape` 指定纸张方向。输入已经拍不到的内容对应留白，页内印刷文字、图表与插图保留为图像。浅色印刷和反光区域需要看输出页复查。
-
-如果书脊判断不稳，整张作为一页保留，页码列在 `review_pages`。可以传 `--gutter 0.49`，或用 `--gutter '0.46,0.51'` 表示书脊顶部和底部在 EXIF 转正照片中的横向比例。单页边界难以区分时可传 `--corners`。每页图像和纸面遮罩保存在 `pages/`，`run.json` 记录边界、分割和留白情况。纸面定位不可靠时保守保留可见内容并标记复查。
+OCR 集成测试需要本机已准备 PaddleOCR 权重：
 
 ```powershell
-& $py -m docscan to-pdf --input '摊开的书.jpg' --layout spread --pdf-mode searchable --output outputs/book_search
-& $py -m docscan verify-pdf --input outputs/book_search/book.pdf --expected-text outputs/book_search/book.txt
-```
-
-`--pdf-mode searchable` 为每个处理后的页面加可搜索文字层，使用前先准备 OCR 权重。严重弯曲的单页可选 UVDoc，建议对照 `before_dewarp.png` 检查展平效果。两种默认图像流程使用现有图像处理依赖即可。
-
-双栏排版可加 `--reading-order two-column`。程序按每页中线分栏，在跨栏标题之间先读左栏再读右栏。默认 `rows` 按行读取，适合单栏。两个选项也可用于 `scan` 和 `ocr-check`。传给 `verify-pdf --ocr-json` 的文件应包含图像宽高、识别行文本和四边形坐标。
-
-```powershell
-& $py -m docscan prepare-models --dewarp
-& $py -m docscan to-pdf --input '摊开的书.jpg' --layout spread --dewarp uvdoc --output outputs/book_flattened
-```
-
-## 批处理与合成复现
-
-批量扫描按文件名排序。`--corners` 对目录输入接收同名 `*.corners.json` 的目录。`--auto-first` 在无合适自动候选时使用标注，运行记录会单列人工补救。目录扫描会继续处理坏图之后的照片，任一图片失败时返回非零。
-
-```powershell
-& $py -m docscan make-samples --output data/synthetic --seed 42
-& $py -m docscan validate-data --manifest data/synthetic/manifest.csv
-& $py -m docscan scan --input data/synthetic --corners data/synthetic --auto-first --ocr none --output outputs/batch_images
-& $py -m docscan benchmark --manifest data/synthetic/manifest.csv --split test --source synthetic --mode shared-corners --config configs/experiment.yaml --output outputs/reproduce_test
-& $py -m docscan benchmark --manifest data/synthetic/manifest.csv --split test --source synthetic --mode auto --config configs/experiment.yaml --output outputs/reproduce_auto
-& $py -m docscan summarize --run-dir outputs/reproduce_test
-& $py -m docscan build-report --run-dir outputs/reproduce_test --auto-run-dir outputs/reproduce_auto --output reports
-```
-
-`make-samples` 需要新目录或空目录。可用 `--font` 或 `DOCSCAN_FONT` 指定支持中英文的 TTF、OTF 或 TTC。相同依赖、字体文件和种子可复核样例哈希。`benchmark` 输出逐图 `results.csv`、按方法与拍摄条件汇总的 `summary.csv` 及参数快照。`analysis/` 存放 CER 或覆盖率图、耗时表、四条件光照对照、全页与局部案例。测试配置来自开发集，含配置及模型哈希。
-
-## 真实实验
-
-按 [拍摄与数据导入](docs/data.md) 准备 `data/real/manifest.csv`。正式对照先核对 4 份开发文档和 6 份测试文档，每份四种拍摄条件各一张。以下命令使用默认配置作为真实开发起点。可对照 `configs/dev_wide.yaml`，选定后把对应开发运行目录传给 `freeze-config`。
-
-```powershell
-& $py -m docscan validate-data --manifest data/real/manifest.csv --require-real-plan
-& $py -m docscan benchmark --manifest data/real/manifest.csv --split dev --source real --config configs/default.yaml --output outputs/real_dev
-& $py -m docscan freeze-config --dev-run outputs/real_dev --output configs/experiment.real.yaml
-& $py -m docscan benchmark --manifest data/real/manifest.csv --split test --source real --config configs/experiment.real.yaml --output outputs/real_benchmark
-& $py -m docscan benchmark --manifest data/real/manifest.csv --split test --source real --mode auto --config configs/experiment.real.yaml --output outputs/real_auto
-& $py -m docscan summarize --run-dir outputs/real_benchmark
-& $py -m docscan build-report --run-dir outputs/real_benchmark --auto-run-dir outputs/real_auto --output reports
-```
-
-CER 对预测和真值采用 NFKC、去空白后做字符编辑对齐，保留标点和英文大小写。汇总采用累计错误数除以累计真值长度。数据、模型和预热协议见 [实验说明](docs/experiment.md)。
-
-## 测试与常见错误
-
-```powershell
-& $py -m pytest -m 'not ocr_integration'
 & $py -m pytest -m ocr_integration
 ```
 
-GitHub 的 [Windows validation](.github/workflows/windows.yml) 在推送和拉取请求中安装核心依赖、运行回归测试并核对合成 A4 PDF。在 Actions 手动运行时启用 `ocr`，会增加独立的 OCR 集成任务，校验模型文件并确认集成用例实际执行。
+GitHub 的 [Windows validation](.github/workflows/windows.yml) 会在推送和拉取请求时运行核心回归测试并核对合成 A4 PDF。
 
-| 错误或状态 | 处理 |
-| --- | --- |
-| `detection_failed` | 用角点叠加图或输入图复核边界，再传 `--corners`。A 组原图 OCR 可独立使用。 |
-| `invalid_corners` | 检查坐标系、EXIF 归一化尺寸及左上、右上、右下、左下顺序。 |
-| `ocr_model_missing` | 运行 `prepare-models`，或将两份已准备的权重放入配置目录。 |
-| `model_file_changed` | 根据报错定位缓存文件。移开相应模型目录，再运行 `prepare-models` 或 `prepare-models --dewarp`。 |
-| `invalid_ocr_json` | 使用对应扫描的 `ocr.json`，复核文件中的图像宽高、识别行与坐标。 |
-| 首次 Paddle 导入遇到缓存权限 | Paddle 3.3.0 首次导入会初始化用户缓存目录。用可写用户缓存的本地环境初始化后，可继续离线执行。 |
-| venv 或 pytest 的临时目录权限错误 | 将当前 PowerShell 进程的 `TEMP` 和 `TMP` 指向项目内可写目录，再建 venv 或运行测试。 |
-| `no_searchable_text` | OCR 返回空结果。`ocr.json` 保留 `no_text`，如需查看图像版请用 `--pdf-mode image`。 |
-| `pdf_font_missing_glyph` | 用 `--pdf-font` 或配置 `pdf.font` 指定覆盖这些字符的字体。 |
-| `config_not_frozen` | 在同一来源的开发集完成 A–F 配对，运行 `freeze-config` 后再测。 |
-| OCR 集成测试 `skipped` | 此环境的真实推理未验证。按 `doctor` 输出补装依赖和模型。 |
+## 更多文档
 
-## 项目目录
+- [实拍去影示例与 A/B/C 说明](examples/real/README.md)
+- [命令行完整用法](docs/cli.md)
+- [拍摄与数据导入](docs/data.md)
+- [OCR 对照实验协议](docs/experiment.md)
+- [第三方依赖与模型来源](THIRD_PARTY.md)
 
-- `src/docscan/` 包含命令行入口、几何矫正、图像增强、OCR 和 PDF 导出。
-- `examples/synthetic/` 提供可直接运行的合成样例。完整合成数据集由 `make-samples` 生成。
-- `configs/` 保存默认参数和合成实验的冻结配置。
-- `docs/` 说明拍摄数据格式和对照实验协议。
-- `tests/` 包含几何、书页、OCR 和 PDF 的回归检查。
+## 项目结构
 
-## 原有仓库备注
+- `src/docscan/`：桌面程序、几何矫正、去影、候选生成、OCR 与 PDF 导出
+- `scripts/`：便携包构建与界面验收
+- `examples/real/`：内置实拍示例；`examples/synthetic/`：可复现合成样例
+- `configs/`、`docs/`：默认参数与数据/实验说明
+- `tests/`：几何、书页、OCR 与 PDF 的回归测试
 
-11
+本项目为课程作业；第三方依赖与模型的来源和许可见 [THIRD_PARTY.md](THIRD_PARTY.md)。
