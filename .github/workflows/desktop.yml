@@ -35,7 +35,9 @@ jobs:
           & '.\dist\课程 验收\DocScan\runtime\python.exe' -X utf8 -B scripts/verify_desktop.py --output outputs/desktop-host
       - name: Create the acceptance ZIP
         run: |
-          tar.exe -a -c -f "$env:RUNNER_TEMP/DocScan.zip" -C 'dist/课程 验收' DocScan
+          $package = (Resolve-Path -LiteralPath 'dist/课程 验收/DocScan').Path
+          $zip = Join-Path $env:RUNNER_TEMP 'DocScan.zip'
+          [IO.Compression.ZipFile]::CreateFromDirectory($package, $zip, [IO.Compression.CompressionLevel]::Fastest, $true)
       - uses: actions/upload-artifact@v7
         with:
           path: ${{ runner.temp }}/DocScan.zip
@@ -58,6 +60,5 @@ jobs:
       - name: Extract the package and verify on a separate Windows desktop
         run: |
           $destination = (New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/课程 解压").FullName
-          tar.exe -xf "$env:RUNNER_TEMP/DocScan.zip" -C $destination
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          [IO.Compression.ZipFile]::ExtractToDirectory((Join-Path $env:RUNNER_TEMP 'DocScan.zip'), $destination)
           ./scripts/verify_clean_windows.ps1 -Bundle "$destination/DocScan"
