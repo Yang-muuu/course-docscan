@@ -33,24 +33,31 @@ jobs:
       - name: Exercise the packaged launcher and desktop workflow
         run: |
           & '.\dist\课程 验收\DocScan\runtime\python.exe' -X utf8 -B scripts/verify_desktop.py --output outputs/desktop-host
-      - name: Verify on Windows Server without an installed Python
+      - name: Create the acceptance ZIP
         run: |
-          $image = 'mcr.microsoft.com/windows/server:ltsc2025'
-          docker pull $image
+          tar.exe -a -c -f "$env:RUNNER_TEMP/DocScan.zip" -C 'dist/课程 验收' DocScan
+      - uses: actions/upload-artifact@v7
+        with:
+          path: ${{ runner.temp }}/DocScan.zip
+          archive: false
+          if-no-files-found: error
+          retention-days: 1
+
+  clean-desktop:
+    needs: package
+    runs-on: windows-2025
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: DocScan.zip
+          path: ${{ runner.temp }}
+      - name: Extract the package and verify on a separate Windows desktop
+        run: |
+          $destination = (New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/课程 解压").FullName
+          tar.exe -xf "$env:RUNNER_TEMP/DocScan.zip" -C $destination
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $package = (Resolve-Path 'dist/课程 验收/DocScan').Path
-          $check = (New-Item -ItemType Directory 'outputs/desktop-container').FullName
-          Copy-Item -LiteralPath 'scripts/verify_desktop.py' -Destination $check
-          $command = @'
-          $ErrorActionPreference = 'Stop'
-          if ((Get-Command python,py -ErrorAction SilentlyContinue) -or
-              (Test-Path 'HKLM:\Software\Python\PythonCore') -or
-              (Test-Path 'HKCU:\Software\Python\PythonCore')) {
-            throw 'This Windows image already has Python installed'
-          }
-          'No installed Python detected'
-          & C:\DocScan\runtime\python.exe -X utf8 -B C:\QA\verify_desktop.py --output C:\QA\evidence
-          exit $LASTEXITCODE
-          '@
-          docker run --rm --isolation process --network none --mount "type=bind,source=$package,target=C:\DocScan,readonly" --mount "type=bind,source=$check,target=C:\QA" $image powershell.exe -NoProfile -Command $command
-          exit $LASTEXITCODE
+          ./scripts/verify_clean_windows.ps1 -Bundle "$destination/DocScan"
