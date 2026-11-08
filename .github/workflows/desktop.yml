@@ -56,9 +56,6 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: DocScan.zip
-          path: ${{ runner.temp }}
-      - name: Extract the package and verify on a separate Windows desktop
-        run: |
-          $destination = (New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/课程 解压").FullName
-          [IO.Compression.ZipFile]::ExtractToDirectory((Join-Path $env:RUNNER_TEMP 'DocScan.zip'), $destination)
-          ./scripts/verify_clean_windows.ps1 -Bundle "$destination/DocScan"
+          path: ${{ runner.temp }}/课程 解压
+      - name: Verify the extracted package on a separate Windows desktop
+        run: ./scripts/verify_clean_windows.ps1 -Bundle "$env:RUNNER_TEMP/课程 解压/DocScan"
