@@ -8,7 +8,7 @@
 
 左侧照片列表决定页序，可上移、下移、旋转和删除。「恢复自动」会撤回当前照片的手动裁剪，点击「100% 查看」可放大小字。桌面流程专用于三种去影，每张照片生成一页的三种候选。书页照片按主体页处理。
 
-[历史桌面版 v0.2.0](https://github.com/Yang-muuu/course-docscan/releases/tag/v0.2.0) · [实拍去影示例与使用方法](examples/real/README.md)
+[下载桌面版 v0.2.1](https://github.com/Yang-muuu/course-docscan/releases/tag/v0.2.1) · [实拍去影示例与使用方法](examples/real/README.md)
 
 在项目的 Windows x64 Python 3.13 环境中可从源码启动和构建。
 
