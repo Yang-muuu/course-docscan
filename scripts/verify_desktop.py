@@ -237,6 +237,7 @@ def main() -> None:
     parser.add_argument("--screenshot", type=Path)
     args = parser.parse_args()
     work = args.output.resolve()
+    screenshot = args.screenshot.resolve() if args.screenshot else None
     work.mkdir(parents=True)
     runtime = ROOT / "runtime"
     assert Path(sys.executable).resolve().is_relative_to(runtime), sys.executable
@@ -247,10 +248,11 @@ def main() -> None:
     os.environ["LOCALAPPDATA"] = str(work / "appdata")
     os.environ["TEMP"] = os.environ["TMP"] = str(work)
     launch = verify_launcher(work)
+    os.chdir(ROOT)
     root = tk.Tk()
     app = DocScanWindow(root, configuration())
     try:
-        paper = verify_paper(app, work, args.screenshot)
+        paper = verify_paper(app, work, screenshot)
         others = verify_other_modes(app, work)
     finally:
         app.close()

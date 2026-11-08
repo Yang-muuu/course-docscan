@@ -534,6 +534,7 @@ class DocScanWindow:
 
 
 def main() -> None:
+    os.chdir(ROOT)
     root = tk.Tk()
     try:
         local = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "DocScan"

@@ -14,6 +14,7 @@ from tempfile import TemporaryDirectory
 
 
 ROOT = Path(__file__).resolve().parents[1]
+MSVC_RUNTIME = ("msvcp140.dll", "vcomp140.dll", "vcruntime140.dll", "vcruntime140_1.dll")
 sys.path.insert(0, str(ROOT / "src"))
 
 from docscan.models import MODEL_FILES, MODEL_NAMES, model_status
@@ -47,15 +48,20 @@ def build(output: Path, model_directory: Path) -> None:
         raise RuntimeError("Prepare and verify the PP-OCR models before building.")
 
     base = Path(sys.base_prefix)
-    csc = Path(os.environ["WINDIR"]) / "Microsoft.NET/Framework64/v4.0.30319/csc.exe"
+    windows = Path(os.environ["WINDIR"])
+    csc = windows / "Microsoft.NET/Framework64/v4.0.30319/csc.exe"
+    redist = windows / "System32"
+    if not all((redist / name).is_file() for name in MSVC_RUNTIME):
+        raise RuntimeError("Install the Microsoft Visual C++ Redistributable (x64) on the build machine.")
     output.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(prefix="docscan-build-", dir=output.parent) as temporary:
         bundle = Path(temporary) / "DocScan"
         runtime = bundle / "runtime"
         runtime.mkdir(parents=True)
-        for filename in ("python.exe", "pythonw.exe", "python3.dll", "python313.dll",
-                         "vcruntime140.dll", "vcruntime140_1.dll", "LICENSE.txt"):
+        for filename in ("python.exe", "pythonw.exe", "python3.dll", "python313.dll", "LICENSE.txt"):
             shutil.copy2(base / filename, runtime / filename)
+        for filename in MSVC_RUNTIME:
+            shutil.copy2(redist / filename, runtime / filename)
         ignore = shutil.ignore_patterns("__pycache__", "*.pyc", "*.pdb", "site-packages", "ensurepip", "idlelib", "test")
         shutil.copytree(base / "Lib", runtime / "Lib", ignore=ignore)
         shutil.copytree(base / "DLLs", runtime / "DLLs", ignore=shutil.ignore_patterns("_test*", "*.pdb"))

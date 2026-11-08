@@ -29,16 +29,16 @@ jobs:
         run: |
           python -m docscan prepare-models
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/build_desktop.py
+          python scripts/build_desktop.py --output 'dist/课程 验收/DocScan'
       - name: Exercise the packaged launcher and desktop workflow
         run: |
-          & .\dist\DocScan\runtime\python.exe -X utf8 -B scripts/verify_desktop.py --output outputs/desktop-host
-      - name: Verify on Windows Server Core without an installed Python
+          & '.\dist\课程 验收\DocScan\runtime\python.exe' -X utf8 -B scripts/verify_desktop.py --output outputs/desktop-host
+      - name: Verify on Windows Server without an installed Python
         run: |
-          $image = 'mcr.microsoft.com/windows/servercore:ltsc2025'
+          $image = 'mcr.microsoft.com/windows/server:ltsc2025'
           docker pull $image
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $package = (Resolve-Path 'dist/DocScan').Path
+          $package = (Resolve-Path 'dist/课程 验收/DocScan').Path
           $check = (New-Item -ItemType Directory 'outputs/desktop-container').FullName
           Copy-Item -LiteralPath 'scripts/verify_desktop.py' -Destination $check
           $command = @'
